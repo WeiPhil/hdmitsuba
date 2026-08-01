@@ -86,8 +86,11 @@ environment).
 - `ApplyPendingUpdates()` + `SetTime()` per render (stage edits between
   renders).
 
-`HDMITSUBA_ENGINE_USE_SCENE_INDEX=false` selects the deprecated legacy
-front-end for A/B comparisons.
+The deprecated `UsdImagingDelegate` front-end (and its
+`HDMITSUBA_ENGINE_USE_SCENE_INDEX` escape hatch) has since been **removed**
+from `render_engine` and the C++ test harness — the scene-index chain is the
+only front-end. The A/B numbers below were gathered while both paths still
+existed and are kept as the historical record of the switch.
 
 ### Tests
 
@@ -108,7 +111,7 @@ bypass the emulation scene index, so the terminal scene index stays empty.
 |---|---|
 | ctest (scene-index C++ harness) | 4/4 |
 | pytest | 118 passed / 7 skipped (== legacy baseline) |
-| pytest, legacy fallback (`HDMITSUBA_ENGINE_USE_SCENE_INDEX=false`) | 118 / 7 |
+| pytest, legacy fallback (before its removal) | 118 / 7 |
 | Fuzzing suite | 188/188 |
 | usdrecord A/B scene-index vs legacy: subdiv | RMSE 0.0023 (sampling noise; was 0.28) |
 | … native material (checkerboard) | RMSE 0 (was 0.04) |

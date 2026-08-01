@@ -56,31 +56,18 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/common.h>
+#include <pxr/usd/usd/prim.h>
+#include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/timeCode.h>
-#include <pxr/base/tf/envSetting.h>
 #include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hdsi/implicitSurfaceSceneIndex.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 #include "absl/strings/str_cat.h"
-
-PXR_NAMESPACE_OPEN_SCOPE
-
-// Hydra 2.0 is the default front-end: the stage is imaged through the
-// UsdImagingStageSceneIndex chain. Set to false to fall back to the
-// deprecated UsdImagingDelegate (Hydra 1.0) front-end, e.g. for A/B
-// comparisons.
-TF_DEFINE_ENV_SETTING(HDMITSUBA_ENGINE_USE_SCENE_INDEX, true,
-                      "Use the Hydra 2.0 scene index front-end "
-                      "(UsdImagingStageSceneIndex) in the render engine. When "
-                      "false, uses the deprecated UsdImagingDelegate.");
-
-PXR_NAMESPACE_CLOSE_SCOPE
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -437,7 +424,6 @@ void RenderEngine::Configure(
 
       // Clean up any previous state in reverse order.
       params_delegate_ = nullptr;
-      scene_delegate_ = nullptr;
       display_style_scene_index_ = nullptr;
       stage_scene_index_ = nullptr;
       render_delegate_ = nullptr;
@@ -459,7 +445,7 @@ void RenderEngine::Configure(
       if (!render_index_) {
         throw std::runtime_error("Failed to create render index.");
       }
-      if (TfGetEnvSetting(HDMITSUBA_ENGINE_USE_SCENE_INDEX)) {
+      {
         // Hydra 2.0 front-end: build the USD imaging scene index chain and
         // insert it into the render index (scene index emulation drives the
         // delegate's prims from it).
@@ -497,11 +483,6 @@ void RenderEngine::Configure(
                                         SdfPath::AbsoluteRootPath());
         stage_scene_index_->SetTime(UsdTimeCode::EarliestTime());
         stage_scene_index_->ApplyPendingUpdates();
-      } else {
-        // Deprecated Hydra 1.0 front-end.
-        scene_delegate_ = std::make_unique<UsdImagingDelegate>(
-            render_index_.get(), SdfPath::AbsoluteRootPath());
-        scene_delegate_->Populate(stage_->GetPseudoRoot());
       }
       params_delegate_ = std::make_unique<EngineSceneDelegate>(
           render_index_.get(), SdfPath{"/task_controller"});
@@ -509,16 +490,9 @@ void RenderEngine::Configure(
     }
   }
 
-  if (refine_level_fallback.has_value()) {
-    if (scene_delegate_) {
-      if (refine_level_fallback.value() !=
-          scene_delegate_->GetRefineLevelFallback()) {
-        scene_delegate_->SetRefineLevelFallback(refine_level_fallback.value());
-      }
-    } else if (display_style_scene_index_) {
-      display_style_scene_index_->SetRefineLevelFallback(
-          refine_level_fallback.value());
-    }
+  if (refine_level_fallback.has_value() && display_style_scene_index_) {
+    display_style_scene_index_->SetRefineLevelFallback(
+        refine_level_fallback.value());
   }
 
   if (cache_invalid) {
@@ -616,14 +590,10 @@ absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
                     TfToken::HashFunctor>
 RenderEngine::Render(UsdTimeCode time_code) {
   UpdateAovsAndBuffers();
-  if (stage_scene_index_) {
-    // Flush any pending stage edits before updating the time, so that
-    // structural changes are processed with the correct time sampling.
-    stage_scene_index_->ApplyPendingUpdates();
-    stage_scene_index_->SetTime(time_code);
-  } else {
-    scene_delegate_->SetTime(time_code);
-  }
+  // Flush any pending stage edits before updating the time, so that
+  // structural changes are processed with the correct time sampling.
+  stage_scene_index_->ApplyPendingUpdates();
+  stage_scene_index_->SetTime(time_code);
   do {
     TF_PY_ALLOW_THREADS_IN_SCOPE();
     engine_->Execute(render_index_.get(), &tasks_);
