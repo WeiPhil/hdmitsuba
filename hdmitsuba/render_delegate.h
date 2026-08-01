@@ -83,7 +83,6 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
 
  private:
   void Initialize();
-  void MarkAllPrimsDirty(HdChangeTracker* tracker);
 
   // This class is not copyable.
   HdMitsubaRenderDelegate(const HdMitsubaRenderDelegate&) = delete;

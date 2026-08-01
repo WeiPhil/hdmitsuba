@@ -177,6 +177,35 @@ bypass the emulation scene index, so the terminal scene index stays empty.
 | RenderSettings prim `mitsuba:integrator:type` via usdrecord | applied (direct vs path clearly differs) |
 | usdview interactive (Xvfb), materials/CornellBox/Kitchen_set | renders, "Hydra: Mitsuba" |
 
+### Variant switches no longer use the legacy dirtying API
+
+A mid-session `mitsuba:variant` change (e.g. usdview restoring a persisted
+renderer setting) recreates the templated scene manager. The old path then
+forced a global re-sync via `HdChangeTracker::MarkAllRprimsDirty` /
+`MarkSprimDirty` / `MarkBprimDirty` — front-end legacy API that Hydra 2.0
+refuses for scene-index-fed prims ("Calling method on HdChangeTracker that
+requires emulation") and silently no-ops, leaving the new scene manager
+empty ("No sensor specified"). The prim specs are Mitsuba-variant
+independent, so the new manager is now seeded directly from the previous
+manager's cached specs (`SceneManager::SeedSpecsFrom`) and rebuilds the
+scene without dirtying a single Hydra prim. Verified: a variant switch
+renders identically (`usdview_compat_test.py`), in both the default and the
+observer-renderer UsdImagingGL wirings.
+
+### Application-level (usdview wiring) compliance tests
+
+`tests/usdview_compat_driver.py` drives hdMitsuba through the same
+UsdImagingGL + HdxTaskController stack usdview uses (headless via
+xvfb + a usdrecord-style offscreen GL context):
+scene camera, free camera via `SetCameraState`, usdview's default camera
+light via `SetLightingState`, every advertised AOV, and a mid-session
+variant switch — failing on any Tf error. `tests/usdview_compat_test.py`
+runs it in both engine wirings and adds an image-equivalence test for the
+variant switch. This is the layer where "works in the test suite, breaks in
+usdview" bugs live: the unit/fuzzing suites drive the delegate through the
+render_engine, which never pushes renderer settings mid-session and never
+uses task-controller cameras or lighting.
+
 ## Notes / follow-ups
 
 - usdview's "Enable Default Camera Light" / "Enable Default Dome Light"

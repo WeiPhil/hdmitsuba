@@ -211,25 +211,7 @@ HdBprim* HdMitsubaRenderDelegate::CreateFallbackBprim(const TfToken& typeId) {
   return nullptr;
 }
 
-void HdMitsubaRenderDelegate::MarkAllPrimsDirty(HdChangeTracker* tracker) {
-  tracker->MarkAllRprimsDirty(HdChangeTracker::AllDirty);
-  if (render_index_) {
-    for (const TfToken& sprim_type : GetSupportedSprimTypes()) {
-      for (const SdfPath& id : render_index_->GetSprimSubtree(
-               sprim_type, SdfPath::AbsoluteRootPath())) {
-        tracker->MarkSprimDirty(id, HdChangeTracker::AllDirty);
-      }
-    }
-    for (const TfToken& bprim_type : GetSupportedBprimTypes()) {
-      for (const SdfPath& id : render_index_->GetBprimSubtree(
-               bprim_type, SdfPath::AbsoluteRootPath())) {
-        tracker->MarkBprimDirty(id, HdChangeTracker::AllDirty);
-      }
-    }
-  }
-}
-
-void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
+void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   std::string target_variant =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
           .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
@@ -239,11 +221,17 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
             "Mitsuba variant changed from '%s' to '%s'. Recreating "
             "SceneManager.\n",
             current_variant_.c_str(), target_variant.c_str());
-    scene_impl_ = std::unique_ptr<SceneManager>(
+    // The cached prim specs are variant-independent: seed the new scene
+    // manager from them and rebuild the Mitsuba scene directly. No Hydra
+    // prim is dirtied — a render delegate cannot re-dirty scene-index-fed
+    // prims through the change tracker's legacy API (it raises "requires
+    // emulation" coding errors and no-ops in Hydra 2.0 hosts like usdview).
+    std::unique_ptr<SceneManager> new_manager(
         SceneManager::CreateSceneManager(target_variant));
+    new_manager->SeedSpecsFrom(*scene_impl_);
+    scene_impl_ = std::move(new_manager);
     render_param_->SetScene(scene_impl_.get());
     current_variant_ = target_variant;
-    MarkAllPrimsDirty(tracker);
   }
 
   VtDictionary namespaced_settings;
