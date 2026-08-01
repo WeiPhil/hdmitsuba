@@ -86,9 +86,8 @@ The pieces involved are:
     settings authored on `RenderSettings` prims in scene index mode.
 *   **`render_engine`**: images the stage through
     `UsdImagingCreateSceneIndices` (with implicit-surface-to-mesh conversion
-    and display-style overrides). Set `HDMITSUBA_ENGINE_USE_SCENE_INDEX=false`
-    to fall back to the deprecated `UsdImagingDelegate` front-end, e.g. for
-    A/B comparisons.
+    and display-style overrides). This is the only front-end: the deprecated
+    `UsdImagingDelegate` path has been removed.
 *   **C++ tests**: use a scene-index-based harness
     (`tests/test_util.h:CreateSceneIndexTestHarness`) that mirrors the usdview
     wiring, including end-to-end invalidation.

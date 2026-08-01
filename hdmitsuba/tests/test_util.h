@@ -16,7 +16,6 @@
 
 #include <memory>
 #include <string>
-#include <tuple>
 #include <utility>
 
 #include <drjit-core/jit.h>
@@ -38,7 +37,6 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/usd/stage.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
@@ -77,24 +75,6 @@ struct MitsubaStaticState {
     jit_shutdown();
   }
 };
-
-template <typename Scene>
-std::tuple<std::unique_ptr<HdMitsubaRenderDelegate>,
-           std::unique_ptr<HdRenderIndex>, std::unique_ptr<UsdImagingDelegate>,
-           SceneManager*, HdMitsubaRenderParam*>
-CreateRenderDelegateStateObjects() {
-  auto render_delegate = std::make_unique<HdMitsubaRenderDelegate>();
-  auto render_index = std::unique_ptr<HdRenderIndex>(
-      pxr::HdRenderIndex::New(render_delegate.get(), {}));
-  auto scene_delegate =
-      std::make_unique<UsdImagingDelegate>(render_index.get(), SdfPath("/"));
-  auto* render_param =
-      static_cast<HdMitsubaRenderParam*>(render_delegate->GetRenderParam());
-  auto* scene_manager = render_param->GetScene();
-  return std::make_tuple(std::move(render_delegate), std::move(render_index),
-                         std::move(scene_delegate), scene_manager,
-                         render_param);
-}
 
 // Minimal scene delegate that stores values for the harness sync task.
 class HdMitsubaTestTaskDelegate final : public HdSceneDelegate {

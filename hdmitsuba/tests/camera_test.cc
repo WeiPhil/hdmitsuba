@@ -29,7 +29,6 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/tokens.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
 
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/tests/test_util.h"

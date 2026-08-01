@@ -39,7 +39,6 @@
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
 #include <pxr/imaging/hdsi/legacyDisplayStyleOverrideSceneIndex.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -111,13 +110,11 @@ class RenderEngine {
   pxr::HdRendererPlugin* renderer_plugin_ = nullptr;
   pxr::HdPluginRenderDelegateUniqueHandle render_delegate_ = nullptr;
   std::unique_ptr<pxr::HdRenderIndex> render_index_;
-  // Hydra 2.0 (default): the stage is imaged through the
-  // UsdImagingStageSceneIndex chain inserted into the render index.
+  // The stage is imaged through the Hydra 2.0 UsdImagingStageSceneIndex
+  // chain inserted into the render index.
   pxr::UsdImagingStageSceneIndexRefPtr stage_scene_index_;
   pxr::HdsiLegacyDisplayStyleOverrideSceneIndexRefPtr
       display_style_scene_index_;
-  // Deprecated Hydra 1.0 path (HDMITSUBA_ENGINE_USE_SCENE_INDEX=false).
-  std::unique_ptr<pxr::UsdImagingDelegate> scene_delegate_;
   std::unique_ptr<EngineSceneDelegate> params_delegate_;
   std::unique_ptr<pxr::HdEngine> engine_;
   pxr::GfVec2i resolution_;
