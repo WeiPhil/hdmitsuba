@@ -697,6 +697,47 @@ class SceneModel final : public SceneManager {
     reset_progressive_ = true;
   }
 
+  const MeshSpecMap& GetMeshSpecs() const override { return mesh_specs_; }
+  const CurveSpecMap& GetCurveSpecs() const override { return curve_specs_; }
+  const CameraSpecMap& GetCameraSpecs() const override {
+    return camera_specs_;
+  }
+  const LightSpecMap& GetLightSpecs() const override { return light_specs_; }
+  const MaterialSpecMap& GetMaterialSpecs() const override {
+    return material_specs_;
+  }
+
+  void SeedSpecsFrom(const SceneManager& previous) override {
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg("SeedSpecsFrom: %zu meshes, %zu curves, %zu cameras, "
+             "%zu lights, %zu materials\n",
+             previous.GetMeshSpecs().size(), previous.GetCurveSpecs().size(),
+             previous.GetCameraSpecs().size(), previous.GetLightSpecs().size(),
+             previous.GetMaterialSpecs().size());
+    // Sync order: materials first so that meshes committed later resolve
+    // them; every spec is forced to a full rebuild in this manager.
+    auto seed = [](auto spec, auto&& sync) {
+      spec.needs_rebuild = true;
+      spec.dirty_bits = 0;
+      sync(std::move(spec));
+    };
+    for (const auto& [id, spec] : previous.GetMaterialSpecs()) {
+      seed(spec, [this](MaterialSpec s) { SyncMaterial(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetCameraSpecs()) {
+      seed(spec, [this](CameraSpec s) { SyncCamera(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetLightSpecs()) {
+      seed(spec, [this](LightSpec s) { SyncLight(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetMeshSpecs()) {
+      seed(spec, [this](MeshSpec s) { SyncMesh(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetCurveSpecs()) {
+      seed(spec, [this](CurveSpec s) { SyncCurves(std::move(s)); });
+    }
+  }
+
   void RemoveShape(const SdfPath& id) override {
     TF_DEBUG(HDMITSUBA_LIFECYCLE).Msg("RemoveShape: %s\n", id.GetText());
     std::string id_str = id.GetAsString();

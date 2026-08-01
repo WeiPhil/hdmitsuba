@@ -18,6 +18,7 @@
 #include <unordered_map>
 
 #include <absl/base/const_init.h>
+#include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
 #include <mitsuba/core/object.h>
 #include <pxr/base/tf/token.h>
@@ -51,6 +52,31 @@ class SceneManager {
   virtual void SyncCamera(CameraSpec spec) = 0;
   virtual void SyncLight(LightSpec spec) = 0;
   virtual void SyncMaterial(MaterialSpec spec) = 0;
+
+  // Read access to the synced prim specs. The specs are plain (Mitsuba
+  // variant independent) data, so they can be moved between scene managers
+  // of different variants.
+  using MeshSpecMap = absl::flat_hash_map<SdfPath, MeshSpec, SdfPath::Hash>;
+  using CurveSpecMap = absl::flat_hash_map<SdfPath, CurveSpec, SdfPath::Hash>;
+  using CameraSpecMap =
+      absl::flat_hash_map<SdfPath, CameraSpec, SdfPath::Hash>;
+  using LightSpecMap = absl::flat_hash_map<SdfPath, LightSpec, SdfPath::Hash>;
+  using MaterialSpecMap =
+      absl::flat_hash_map<SdfPath, MaterialSpec, SdfPath::Hash>;
+  virtual const MeshSpecMap& GetMeshSpecs() const = 0;
+  virtual const CurveSpecMap& GetCurveSpecs() const = 0;
+  virtual const CameraSpecMap& GetCameraSpecs() const = 0;
+  virtual const LightSpecMap& GetLightSpecs() const = 0;
+  virtual const MaterialSpecMap& GetMaterialSpecs() const = 0;
+
+  // Re-seeds this (freshly created) scene manager with the prim specs of a
+  // previous one, marking everything for rebuild. Used when the Mitsuba
+  // variant changes and the scene manager is recreated: the cached specs let
+  // the scene be re-translated without re-syncing any prim through Hydra —
+  // which matters in Hydra 2.0, where a render delegate must not dirty
+  // scene-index-fed prims through the change tracker's legacy API.
+  // Must be called before any rendering, while `previous` is idle.
+  virtual void SeedSpecsFrom(const SceneManager& previous) = 0;
 
   virtual void RemoveShape(const SdfPath& id) = 0;
   virtual void RemoveLight(const SdfPath& id) = 0;
