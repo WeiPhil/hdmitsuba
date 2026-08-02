@@ -227,3 +227,28 @@ uses task-controller cameras or lighting.
   index via `HdsiPrimManagingSceneIndexObserver` instead of rprims/emulation;
   not required for correct usdview behavior.
 
+
+## Cross-delegate references: HdStorm always, HdEmbree via build kit
+
+The HdEmbree comparisons only run where USD was built with the Embree
+plugin, which prebuilt distributions (conda-forge, PyPI) omit — those
+tests skip there. Two additions close the gap:
+
+- `tests/storm_compat_test.py` re-renders the embree-comparison scene with
+  HdStorm — which every USD build ships — through usdrecord (Storm needs
+  an Hgi driver that the in-process engine does not create; usdrecord's
+  FrameRecorder brings its own) under xvfb, and compares the geometry
+  silhouette (background/foreground mask) against the hdMitsuba render at
+  the same sub-half-percent tolerance the embree test uses, for the
+  default and a modified (focal length + translation) camera. The scene
+  camera authors aperture offsets, so lens-shift conventions are covered;
+  an exact 4:3 aperture is authored because the two stacks round
+  fractional image heights differently.
+- `tools/hdembree/` is an out-of-tree build kit for the real HdEmbree:
+  a fetch script (sparse-clones the plugin sources from the OpenUSD tag
+  matching `Usd.GetVersion()`), a CMake project against the installed
+  SDK's `pxrConfig.cmake` plus embree 4, and an install rule that lands
+  next to hdStorm under `$CONDA_PREFIX/plugin/usd/`. Needs network +
+  embree, so it runs on developer machines, not in the sandboxed test
+  container; the skipped tests activate automatically once the plugin
+  registers.
