@@ -78,11 +78,26 @@ environment).
   `HdPrimvarsSchema`/`HdPrimvarSchema` (descriptors in a single pass instead
   of one query per interpolation; values flattened by the schema). Absent
   schemas resolve to explicit defaults (visible, identity transform, no
-  binding, no subdiv tags, refine level 0, no primvars) rather than legacy
-  scene-delegate calls — an instrumented audit (every legacy fallback made
-  fatal) across ctest, the full pytest suite, fuzzing and the usdview
-  compliance driver showed the only reachable "fallbacks" were the miss
-  paths for genuinely absent data.
+  binding, no subdiv tags, refine level 0, no primvars, empty primvar
+  values and indices) rather than legacy scene-delegate calls — an
+  instrumented audit (every legacy fallback made fatal) across ctest, the
+  full pytest suite, fuzzing and the usdview compliance driver showed the
+  only reachable "fallbacks" were the miss paths for genuinely absent
+  data.
+- Ext computations (UsdSkel skinning) are no longer evaluated in the
+  delegate: `scene_index_plugin.cc` registers
+  `HdMitsubaExtComputationPrimvarPruningSceneIndexPlugin`
+  (`HdSiExtComputationPrimvarPruningSceneIndex`) for the Mitsuba renderer via
+  `HdSceneIndexPluginRegistry`, and the render index appends it automatically
+  for *any* scene-index host — usdview, usdrecord, the render_engine — with
+  no host-side wiring. Skinned points arrive as plain `points` primvars, so
+  the `HdExtComputationUtils` block in `SyncPrimvars` is gone. This is the
+  textbook Hydra 2.0 win: a cross-cutting feature added as a filter over the
+  scene, not as per-prim delegate code. The delegate also no longer
+  advertises or creates `extComputation` sprims — the filter consumes those
+  prims before they reach the backend. A regression test scrubs time on
+  `skinned_mesh.usda` with a single engine to pin down invalidation through
+  the filter.
 - `material.cc`: per-terminal render-context resolution — start from the
   universal network, overlay `mitsuba`-context nodes/terminals (a material can
   mix a universal preview surface with `outputs:mitsuba:displacement`). An

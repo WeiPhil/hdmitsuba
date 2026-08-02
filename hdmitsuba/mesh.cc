@@ -35,7 +35,6 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/extComputationUtils.h>
 #include <pxr/imaging/hd/geomSubset.h>
 #include <pxr/imaging/hd/geomSubsetSchema.h>
 #include <pxr/imaging/hd/legacyDisplayStyleSchema.h>
@@ -766,31 +765,12 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
 
   bool transform_dirty = *dirtyBits & HdChangeTracker::DirtyTransform;
 
-  // Query and evaluate computed primvars.
-  HdExtComputationPrimvarDescriptorVector computed_primvar_descs;
-  for (size_t i = 0; i < HdInterpolationCount; ++i) {
-    HdInterpolation interp = static_cast<HdInterpolation>(i);
-    auto descs = sceneDelegate->GetExtComputationPrimvarDescriptors(id, interp);
-    for (const auto& desc : descs) {
-      if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, desc.name) ||
-          transform_dirty) {
-        computed_primvar_descs.push_back(desc);
-      }
-    }
-  }
-
-  HdExtComputationUtils::ValueStore computed_values;
-  if (!computed_primvar_descs.empty()) {
-    computed_values = HdExtComputationUtils::GetComputedPrimvarValues(
-        computed_primvar_descs, sceneDelegate);
-  }
-
-  // Helper to resolve the value (computed vs standard)
+  // Computed primvars (e.g. UsdSkel skinning) need no special handling here:
+  // the HdMitsubaExtComputationPrimvarPruningSceneIndexPlugin scene index —
+  // appended for the Mitsuba renderer by the render index itself — evaluates
+  // ext computations and presents their outputs as plain primvars, so they
+  // arrive through the regular primvar reads below.
   auto resolve_primvar_value = [&](const TfToken& name) -> VtValue {
-    auto it = computed_values.find(name);
-    if (it != computed_values.end()) {
-      return it->second;
-    }
     return GetMeshPrimvarValue(sceneDelegate, id, name);
   };
 
