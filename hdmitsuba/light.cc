@@ -14,6 +14,9 @@
 
 #include "hdmitsuba/light.h"
 
+#include "hdmitsuba/prim_translation.h"
+#include "hdmitsuba/render_delegate.h"
+
 #include <cmath>
 #include <utility>
 
@@ -105,30 +108,44 @@ HdMitsubaLight::HdMitsubaLight(const SdfPath& id, const TfToken& typeId)
 
 void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
                           HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
+  const SdfPath& id = GetId();
+  if (static_cast<HdMitsubaRenderDelegate*>(
+          sceneDelegate->GetRenderIndex().GetRenderDelegate())
+          ->NativeClaimed(id)) {
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
+  }
+  SceneManager* scene =
+      static_cast<HdMitsubaRenderParam*>(renderParam)->GetScene();
+  HdSceneIndexBaseRefPtr scene_index =
+      sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
+  if (!TF_VERIFY(scene_index)) {
+    return;
+  }
+  TranslateLightPrim(scene_index, id, type_id_, *dirtyBits,
+                     &translation_state_, scene);
+  *dirtyBits = HdChangeTracker::Clean;
+}
+
+
+void TranslateLightPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                        const SdfPath& id, const TfToken& prim_type,
+                        HdDirtyBits dirty_bits, LightTranslationState* state,
+                        SceneManager* scene) {
   static const HdDataSourceLocator transform_locator(
       HdXformSchema::GetSchemaToken(), HdXformSchemaTokens->matrix);
   static const HdDataSourceLocator visibility_locator(
       HdVisibilitySchema::GetSchemaToken(),
       HdVisibilitySchemaTokens->visibility);
 
-  const SdfPath& id = GetId();
-  SceneManager* scene =
-      static_cast<HdMitsubaRenderParam*>(renderParam)->GetScene();
-
-  HdSceneIndexBaseRefPtr scene_index =
-      sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
-
-  if (!TF_VERIFY(scene_index)) {
-    return;
-  }
   HdContainerDataSourceHandle data_source = scene_index->GetPrim(id).dataSource;
 
   // 1. Visibility
   const bool visible = GetParam<bool>(data_source, visibility_locator, true);
 
   if (!visible) {
-    RemoveFromScene(scene);
-    *dirtyBits = HdChangeTracker::Clean;
+    scene->RemoveLight(id);
+    state->is_instantiated = false;
     return;
   }
 
@@ -143,8 +160,8 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
   if (!light_container) {
     TF_WARN("Light %s has no light parameters. Removing from scene.",
             id.GetText());
-    RemoveFromScene(scene);
-    *dirtyBits = HdChangeTracker::Clean;
+    scene->RemoveLight(id);
+    state->is_instantiated = false;
     return;
   }
 
@@ -181,13 +198,13 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
 
   // 3. Calculate final to_world transform and normalized emission
   auto [to_world, emission] = ComputeLightTransformAndEmission(
-      type_id_, transform, base_emission, radius, width, height, normalize,
+      prim_type, transform, base_emission, radius, width, height, normalize,
       treat_as_point, shaping_cone_angle);
 
   // 4. Populate LightSpec
   LightSpec spec;
   spec.id = id;
-  spec.prim_type = type_id_;
+  spec.prim_type = prim_type;
   spec.transform = UsdToMitsubaTransform(to_world);
   spec.emission = emission;
   spec.shaping_cone_angle = shaping_cone_angle;
@@ -197,20 +214,19 @@ void HdMitsubaLight::Sync(HdSceneDelegate* sceneDelegate,
 
   // 5. Determine if rebuild is needed using a clean declarative check
   bool needs_rebuild =
-      !is_instantiated_ || (treat_as_point != treat_as_point_) ||
-      ((shaping_cone_angle_ != 0.0f) != (shaping_cone_angle != 0.0f)) ||
-      (texture_file_path != texture_file_path_);
+      !state->is_instantiated || (treat_as_point != state->treat_as_point) ||
+      ((state->shaping_cone_angle != 0.0f) != (shaping_cone_angle != 0.0f)) ||
+      (texture_file_path != state->texture_file_path);
 
-  is_instantiated_ = true;
-  treat_as_point_ = treat_as_point;
-  shaping_cone_angle_ = shaping_cone_angle;
-  texture_file_path_ = texture_file_path;
+  state->is_instantiated = true;
+  state->treat_as_point = treat_as_point;
+  state->shaping_cone_angle = shaping_cone_angle;
+  state->texture_file_path = texture_file_path;
 
   spec.needs_rebuild = needs_rebuild;
-  spec.dirty_bits = *dirtyBits;
+  spec.dirty_bits = dirty_bits;
 
   scene->SyncLight(std::move(spec));
-  *dirtyBits = HdChangeTracker::Clean;
 }
 
 HdDirtyBits HdMitsubaLight::GetInitialDirtyBitsMask() const {
@@ -223,7 +239,7 @@ void HdMitsubaLight::Finalize(HdRenderParam* renderParam) {
 
 void HdMitsubaLight::RemoveFromScene(SceneManager* scene) {
   scene->RemoveLight(GetId());
-  is_instantiated_ = false;
+  translation_state_.is_instantiated = false;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

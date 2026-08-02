@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "hdmitsuba/prim_translation.h"
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/sprim.h>
 #include <pxr/imaging/hd/types.h>
@@ -39,8 +40,7 @@ class HdMitsubaMaterial final : public HdMaterial {
   // only change parameter values (same nodes/connections/terminals): those
   // update the existing Mitsuba BSDF in place instead of rebuilding it,
   // which keeps frozen kernels valid during interactive tweaks.
-  HdMaterialNetwork2 last_network_;
-  bool has_last_network_ = false;
+  MaterialTranslationState translation_state_;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

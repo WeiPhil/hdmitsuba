@@ -642,6 +642,12 @@ class SceneModel final : public SceneManager {
     if (prev_it == camera_specs_.end()) {
       spec.needs_rebuild = true;
     }
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != camera_specs_.end() && prev_it->second.needs_rebuild) {
+      spec.needs_rebuild = true;
+    }
     if (prev_it != camera_specs_.end() && !spec.needs_rebuild) {
       spec.dirty_bits |= prev_it->second.dirty_bits;
     }
@@ -659,6 +665,12 @@ class SceneModel final : public SceneManager {
     absl::MutexLock lock(state_mutex_);
     auto prev_it = mesh_specs_.find(spec.id);
     if (prev_it == mesh_specs_.end()) {
+      spec.needs_rebuild = true;
+    }
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != mesh_specs_.end() && prev_it->second.needs_rebuild) {
       spec.needs_rebuild = true;
     }
     if (prev_it != mesh_specs_.end() && !spec.needs_rebuild) {
@@ -682,6 +694,12 @@ class SceneModel final : public SceneManager {
     if (prev_it == light_specs_.end()) {
       spec.needs_rebuild = true;
     }
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != light_specs_.end() && prev_it->second.needs_rebuild) {
+      spec.needs_rebuild = true;
+    }
     if (prev_it != light_specs_.end() && !spec.needs_rebuild) {
       spec.dirty_bits |= prev_it->second.dirty_bits;
     }
@@ -693,6 +711,14 @@ class SceneModel final : public SceneManager {
     TRACE_FUNCTION();
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncMaterial: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
+    auto prev_it = material_specs_.find(spec.id);
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != material_specs_.end() &&
+        prev_it->second.needs_rebuild) {
+      spec.needs_rebuild = true;
+    }
     material_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;
   }

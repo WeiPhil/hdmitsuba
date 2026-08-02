@@ -14,6 +14,9 @@
 
 #include "hdmitsuba/camera.h"
 
+#include "hdmitsuba/prim_translation.h"
+#include "hdmitsuba/render_delegate.h"
+
 #include <string>
 #include <utility>
 
@@ -22,7 +25,9 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/imaging/hd/camera.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/imaging/hd/cameraSchema.h>
+#include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/sceneIndex.h>
@@ -94,6 +99,13 @@ HdMitsubaCamera::HdMitsubaCamera(const SdfPath& id) : HdCamera(id) {}
 
 void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
                            HdRenderParam* renderParam, HdDirtyBits* dirtyBits) {
+  if (static_cast<HdMitsubaRenderDelegate*>(
+          sceneDelegate->GetRenderIndex().GetRenderDelegate())
+          ->NativeClaimed(GetId())) {
+    HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
+  }
   HdDirtyBits dirty_bits_copy = *dirtyBits;
   TF_DEBUG(HDMITSUBA_SYNC)
       .Msg("HdMitsubaCamera::Sync: %s\n", GetId().GetText());
@@ -133,6 +145,112 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   static_cast<HdMitsubaRenderParam*>(renderParam)
       ->GetScene()
       ->SyncCamera(std::move(spec));
+}
+
+
+namespace {
+
+template <typename T>
+T GetCameraField(const HdContainerDataSourceHandle& camera_source,
+                 const TfToken& key, const T& fallback) {
+  if (!camera_source) return fallback;
+  if (auto typed = HdTypedSampledDataSource<T>::Cast(camera_source->Get(key))) {
+    return typed->GetTypedValue(0.0f);
+  }
+  return fallback;
+}
+
+}  // namespace
+
+// Scene-index-native camera translation: reads the camera and xform schemas
+// directly, mirroring what HdCamera::Sync + the Sync above assemble through
+// the emulated path.
+void TranslateCameraPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                         const SdfPath& id, HdDirtyBits dirty_bits,
+                         CameraTranslationState* state,
+                         SceneManager* scene_manager) {
+  HdContainerDataSourceHandle prim_source = scene_index->GetPrim(id).dataSource;
+  if (!prim_source) {
+    return;
+  }
+  HdContainerDataSourceHandle camera_source = HdContainerDataSource::Cast(
+      prim_source->Get(HdCameraSchema::GetSchemaToken()));
+
+  GfMatrix4d transform(1.0);
+  HdXformSchema xform = HdXformSchema::GetFromParent(prim_source);
+  if (xform.IsDefined()) {
+    if (HdMatrixDataSourceHandle matrix = xform.GetMatrix()) {
+      transform = matrix->GetTypedValue(0.0f);
+    }
+  }
+
+  const float focal_length =
+      GetCameraField<float>(camera_source, HdCameraSchemaTokens->focalLength,
+                            0.0f);
+  const float horizontal_aperture = GetCameraField<float>(
+      camera_source, HdCameraSchemaTokens->horizontalAperture, 0.0f);
+  const float vertical_aperture = GetCameraField<float>(
+      camera_source, HdCameraSchemaTokens->verticalAperture, 0.0f);
+  const float horizontal_aperture_offset = GetCameraField<float>(
+      camera_source, HdCameraSchemaTokens->horizontalApertureOffset, 0.0f);
+  const float vertical_aperture_offset = GetCameraField<float>(
+      camera_source, HdCameraSchemaTokens->verticalApertureOffset, 0.0f);
+  GfVec2f clipping_range(0.01f, 1000.0f);
+  if (camera_source) {
+    if (auto typed = HdTypedSampledDataSource<GfVec2f>::Cast(
+            camera_source->Get(HdCameraSchemaTokens->clippingRange))) {
+      clipping_range = typed->GetTypedValue(0.0f);
+    }
+  }
+
+  auto get_custom = [&](const TfToken& key) -> VtValue {
+    if (!camera_source) return VtValue();
+    if (auto sampled = HdSampledDataSource::Cast(camera_source->Get(key))) {
+      return sampled->GetValue(0.0f);
+    }
+    return VtValue();
+  };
+
+  std::string sensor_type =
+      get_custom(TfToken("mitsuba:sensor:type"))
+          .GetWithDefault<std::string>("perspective");
+  VtValue filter_value =
+      get_custom(TfToken("mitsuba:sensor:film:pixel_filter:type"));
+  if (!filter_value.IsEmpty()) {
+    state->film_pixel_filter_type =
+        filter_value.GetWithDefault<std::string>("");
+  }
+
+  CameraSpec spec;
+  spec.id = id;
+  spec.transform = UsdToMitsubaSensorTransform(transform);
+  spec.sensor_type = sensor_type;
+  if (focal_length > 0.0f && horizontal_aperture > 0.0f) {
+    spec.fov = dr::rad_to_deg(
+        2.0 * dr::atan(horizontal_aperture / (2.0 * focal_length)));
+  } else {
+    spec.fov = 0.0f;
+  }
+  spec.horizontal_aperture_offset =
+      horizontal_aperture > 0.0f
+          ? horizontal_aperture_offset / horizontal_aperture
+          : 0.0f;
+  spec.vertical_aperture_offset =
+      vertical_aperture > 0.0f
+          ? -vertical_aperture_offset / vertical_aperture
+          : 0.0f;
+  spec.pixel_filter_type = state->film_pixel_filter_type;
+  spec.near_clip = clipping_range[0];
+  spec.far_clip = clipping_range[1];
+  spec.dirty_bits = dirty_bits;
+
+  spec.needs_rebuild = !state->is_instantiated;
+  spec.needs_rebuild |= sensor_type != state->sensor_type;
+  spec.needs_rebuild |= (sensor_type != "perspective");
+  state->is_instantiated = true;
+  state->sensor_type = sensor_type;
+
+  scene_manager->SyncCamera(std::move(spec));
 }
 
 float HdMitsubaCamera::GetHorizontalFieldOfView() const {
