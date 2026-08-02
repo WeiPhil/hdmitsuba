@@ -66,6 +66,23 @@ environment).
   scene index (every host's input becomes a scene index in current OpenUSD,
   so the terminal index always exists); an unauthored attribute is an empty
   value.
+- `mesh.cc` additionally reads visibility, the prim transform and the bound
+  material id schema-natively (`HdVisibilitySchema`, `HdXformSchema`,
+  `HdMaterialBindingsSchema` on the terminal scene index) instead of
+  `GetVisible()`/`GetTransform()`/`GetMaterialId()`.
+- `mesh.cc` also reads topology, subdivision tags, the refine level and
+  primvars schema-natively: `HdMeshSchema`/`HdMeshTopologySchema` (with geom
+  subsets gathered from `geomSubset` *child prims* of the mesh — their Hydra
+  2.0 representation — including per-subset material bindings),
+  `HdSubdivisionTagsSchema`, `HdLegacyDisplayStyleSchema`, and
+  `HdPrimvarsSchema`/`HdPrimvarSchema` (descriptors in a single pass instead
+  of one query per interpolation; values flattened by the schema). Absent
+  schemas resolve to explicit defaults (visible, identity transform, no
+  binding, no subdiv tags, refine level 0, no primvars) rather than legacy
+  scene-delegate calls — an instrumented audit (every legacy fallback made
+  fatal) across ctest, the full pytest suite, fuzzing and the usdview
+  compliance driver showed the only reachable "fallbacks" were the miss
+  paths for genuinely absent data.
 - `material.cc`: per-terminal render-context resolution — start from the
   universal network, overlay `mitsuba`-context nodes/terminals (a material can
   mix a universal preview surface with `outputs:mitsuba:displacement`). An
