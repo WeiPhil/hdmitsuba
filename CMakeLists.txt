@@ -222,6 +222,7 @@ set(HDMITSUBA_COMMON_INCLUDES
   ${MITSUBA_DIR}/ext/struct-jit/include
 )
 add_subdirectory(hdmitsuba)
+add_subdirectory(usd_imaging_mitsuba)
 add_subdirectory(render_engine)
 
 configure_file(

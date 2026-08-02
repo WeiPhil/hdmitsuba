@@ -22,8 +22,10 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
 #include <pxr/imaging/hd/camera.h>
+#include <pxr/imaging/hd/cameraSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -58,6 +60,34 @@ ScalarAffineTransform4f UsdToMitsubaSensorTransform(
   return to_world;
 }
 
+// Reads a custom (namespaced) camera parameter.
+//
+// Custom `mitsuba:*` camera attributes are overlaid into the prim's `camera`
+// container by the keyless UsdImagingMitsubaAttributesAdapter, so they are
+// read from the render index's terminal scene index; an unauthored attribute
+// is an empty value.
+VtValue GetCustomCameraParamValue(HdSceneDelegate* sceneDelegate,
+                                  const SdfPath& id, const TfToken& key) {
+  if (HdSceneIndexBaseRefPtr scene_index =
+          sceneDelegate->GetRenderIndex().GetTerminalSceneIndex()) {
+    if (HdContainerDataSourceHandle prim_source =
+            scene_index->GetPrim(id).dataSource) {
+      if (HdContainerDataSourceHandle camera_source =
+              HdContainerDataSource::Cast(
+                  prim_source->Get(HdCameraSchema::GetSchemaToken()))) {
+        if (HdSampledDataSourceHandle sampled =
+                HdSampledDataSource::Cast(camera_source->Get(key))) {
+          VtValue value = sampled->GetValue(0.0f);
+          if (!value.IsEmpty()) {
+            return value;
+          }
+        }
+      }
+    }
+  }
+  return VtValue();
+}
+
 }  // namespace
 
 HdMitsubaCamera::HdMitsubaCamera(const SdfPath& id) : HdCamera(id) {}
@@ -70,14 +100,14 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);  // Clears dirty bits.
 
   std::string sensor_type =
-      sceneDelegate
-          ->GetCameraParamValue(GetId(), TfToken("mitsuba:sensor:type"))
+      GetCustomCameraParamValue(sceneDelegate, GetId(),
+                                TfToken("mitsuba:sensor:type"))
           .GetWithDefault<std::string>("perspective");
   if (dirty_bits_copy & HdCamera::DirtyParams) {
     film_pixel_filter_type_ =
-        sceneDelegate
-            ->GetCameraParamValue(
-                GetId(), TfToken("mitsuba:sensor:film:pixel_filter:type"))
+        GetCustomCameraParamValue(
+            sceneDelegate, GetId(),
+            TfToken("mitsuba:sensor:film:pixel_filter:type"))
             .GetWithDefault<std::string>("");
   }
 

@@ -22,6 +22,9 @@ if [ -n "@EMBREE_LIB_DIR@" ]; then
 fi
 
 export DRJIT_NO_RTLD_DEEPBIND=1
-export PXR_PLUGINPATH_NAME="${HDMITSUBA_BUILD_DIR}/hdmitsuba"
+# hdmitsuba: the Hydra render delegate plugin.
+# usd_imaging_mitsuba: the Hydra 2.0 UsdImaging adapter that publishes custom
+# mitsuba:* attributes into the stage scene index.
+export PXR_PLUGINPATH_NAME="${HDMITSUBA_BUILD_DIR}/hdmitsuba:${HDMITSUBA_BUILD_DIR}/usd_imaging_mitsuba:${PXR_PLUGINPATH_NAME}"
 
 echo "hdMitsuba environment set up."
