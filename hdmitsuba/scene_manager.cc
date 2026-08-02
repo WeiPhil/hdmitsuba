@@ -1208,16 +1208,19 @@ class SceneModel final : public SceneManager {
         material_specs_,
         [&](MaterialSpec* spec,
             typename PrimTranslator::TranslatedMaterial& res) {
+          if (!spec->needs_rebuild && spec->dirty_bits != 0) {
+            auto bsdf_it = bsdfs_.find(spec->id.GetAsString());
+            if (bsdf_it == bsdfs_.end() ||
+                !PrimTranslator::UpdateMaterialInPlace(bsdf_it->second.get(),
+                                                       *spec,
+                                                       texture_cache_)) {
+              // The edit could not be applied faithfully in place; fall back
+              // to a full rebuild of the material.
+              spec->needs_rebuild = true;
+            }
+          }
           if (spec->needs_rebuild) {
             res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
-          } else if (spec->dirty_bits != 0) {
-            auto bsdf_it = bsdfs_.find(spec->id.GetAsString());
-            if (!TF_VERIFY(bsdf_it != bsdfs_.end(), "Material not found: %s",
-                           spec->id.GetText())) {
-              return;
-            }
-            PrimTranslator::UpdateMaterialInPlace(bsdf_it->second.get(), *spec,
-                                                  texture_cache_);
           }
         },
         [&](MaterialSpec* spec,

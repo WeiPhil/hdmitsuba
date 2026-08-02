@@ -33,6 +33,14 @@ class HdMitsubaMaterial final : public HdMaterial {
   HdDirtyBits GetInitialDirtyBitsMask() const override;
 
   void Finalize(HdRenderParam* renderParam) override;
+
+ private:
+  // The last network synced to the scene manager, used to detect edits that
+  // only change parameter values (same nodes/connections/terminals): those
+  // update the existing Mitsuba BSDF in place instead of rebuilding it,
+  // which keeps frozen kernels valid during interactive tweaks.
+  HdMaterialNetwork2 last_network_;
+  bool has_last_network_ = false;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

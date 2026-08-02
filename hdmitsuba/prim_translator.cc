@@ -28,6 +28,7 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
 #include <drjit/matrix.h>
+#include <drjit/tensor.h>
 #include <drjit/transform.h>
 #include <mitsuba/core/bitmap.h>
 #include <mitsuba/core/config.h>
@@ -210,6 +211,22 @@ std::optional<mitsuba::Properties> ExtractTextureProperties(
       source_color_space = source_color_space_it->second.Get<TfToken>();
     }
     bool is_raw = UseRawBitmap(source_color_space, input_name);
+    // The Hydra 2.0 material network schema carries the *resolved* color
+    // space per parameter (UsdImaging folds the UsdUVTexture
+    // sourceColorSpace input into the file parameter's colorSpace field; the
+    // parameter itself no longer appears in scene-index networks, so the
+    // legacy read above only ever sees "auto" there). An explicit "raw" or
+    // "sRGB" from the schema overrides the input-name heuristic.
+    auto color_space_it = parameters.find(TfToken("colorSpace:file"));
+    if (color_space_it != parameters.end() &&
+        color_space_it->second.IsHolding<TfToken>()) {
+      const TfToken color_space = color_space_it->second.Get<TfToken>();
+      if (color_space == TfToken("raw")) {
+        is_raw = true;
+      } else if (color_space == TfToken("sRGB")) {
+        is_raw = false;
+      }
+    }
     props.set("raw", is_raw);
     auto wrap_s_it = parameters.find(TfToken("wrapS"));
     if (wrap_s_it != parameters.end() &&
@@ -579,9 +596,158 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
   return res;
 }
 
-MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
-    mitsuba::Object* /*bsdf*/, const MaterialSpec& /*spec*/,
-    const TextureCache& /*texture_cache*/) {}
+namespace {
+
+// Records one object's *direct* traversal entries: its parameter names (used
+// as the `parameters_changed` keys — several Mitsuba plugins only re-derive
+// state for parameters named in the keys list) and its child objects.
+class DirectTraversalEntries final : public mitsuba::TraversalCallback {
+ public:
+  std::vector<std::string> names;
+  std::vector<mitsuba::Object*> children;
+
+ protected:
+  void put_value(std::string_view name, void* /*value*/, uint32_t /*flags*/,
+                 const std::type_info& /*type*/) override {
+    names.emplace_back(name);
+  }
+  void put_object(std::string_view name, mitsuba::Object* value,
+                  uint32_t /*flags*/) override {
+    names.emplace_back(name);
+    if (value != nullptr) {
+      children.push_back(value);
+    }
+  }
+};
+
+// Collects the object hierarchy below (and including) a root together with
+// each object's direct parameter names, so that parameters_changed() can be
+// invoked bottom-up with full key lists after an in-place update.
+class ObjectHierarchyCollector {
+ public:
+  explicit ObjectHierarchyCollector(mitsuba::Object* root) {
+    Visit(root);
+  }
+
+  std::vector<std::pair<mitsuba::Object*, std::vector<std::string>>> objects;
+
+ private:
+  void Visit(mitsuba::Object* object) {
+    if (object == nullptr || !seen_.insert(object).second) {
+      return;
+    }
+    DirectTraversalEntries entries;
+    object->traverse(&entries);
+    objects.emplace_back(object, std::move(entries.names));
+    for (mitsuba::Object* child : entries.children) {
+      Visit(child);
+    }
+  }
+
+  absl::flat_hash_set<void*> seen_;
+};
+
+// Assigns *src to *dst if the traversal entry holds a T. Uses typed
+// assignment (never memcpy): Dr.Jit array types manage reference counts.
+template <typename T>
+bool TryCopyTraversalValue(const std::type_info& type, void* dst, void* src) {
+  if (type == typeid(T) ||
+      std::string_view(type.name()) == typeid(T).name()) {
+    *static_cast<T*>(dst) = *static_cast<T*>(src);
+    return true;
+  }
+  return false;
+}
+
+template <typename... Ts>
+bool TryCopyTraversalValueAny(const std::type_info& type, void* dst,
+                              void* src) {
+  return (TryCopyTraversalValue<Ts>(type, dst, src) || ...);
+}
+
+template <typename T>
+bool TraversalTypeIs(const std::type_info& type) {
+  return type == typeid(T) ||
+         std::string_view(type.name()) == typeid(T).name();
+}
+
+}  // namespace
+
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
+    mitsuba::Object* bsdf, const MaterialSpec& spec,
+    const TextureCache& texture_cache) {
+  // The material sprim only requests an in-place update when the network
+  // structure is unchanged (same nodes, connections, terminals and
+  // string/file parameters), so a freshly translated twin has an identical
+  // traversal layout. Copy every parameter from the twin onto the live
+  // object; anything this cannot faithfully copy makes the caller fall back
+  // to a full rebuild, so an in-place update is never silently wrong.
+  TranslatedMaterial twin = BuildMaterial(spec, texture_cache);
+  if (!twin.bsdf || twin.bsdf.get() == bsdf) {
+    return false;
+  }
+
+  TraversalCallback dst_cb;
+  bsdf->traverse(&dst_cb);
+  TraversalCallback src_cb;
+  twin.bsdf->traverse(&src_cb);
+  if (src_cb.data.size() != dst_cb.data.size()) {
+    return false;
+  }
+
+  using TensorXf = dr::Tensor<mitsuba::DynamicBuffer<Float>>;
+  using Color3f = mitsuba::Color<Float, 3>;
+  using ScalarColor3f = mitsuba::Color<float, 3>;
+  using AffineTransform4f = mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
+  using ScalarAffineTransform3f =
+      mitsuba::Transform<mitsuba::Point<float, 3>, true>;
+
+  for (const auto& [name, src_entry] : src_cb.data) {
+    auto dst_it = dst_cb.data.find(name);
+    if (dst_it == dst_cb.data.end()) {
+      return false;
+    }
+    const std::type_info& type = src_entry.second;
+    const std::type_info& dst_type = dst_it->second.second;
+    if (!(type == dst_type ||
+          std::string_view(type.name()) == dst_type.name())) {
+      return false;
+    }
+    void* src = src_entry.first;
+    void* dst = dst_it->second.first;
+    // Bitmap tensors are derived from the texture file, which the structural
+    // gate keeps unchanged for in-place updates — skipping them is safe (and
+    // avoids copying whole images).
+    if (TraversalTypeIs<TensorXf>(type)) {
+      continue;
+    }
+    const bool copied = TryCopyTraversalValueAny<
+        float, double, bool, int32_t, uint32_t, int64_t, uint64_t, Float,
+        Color3f, ScalarColor3f, mitsuba::Vector<Float, 3>,
+        mitsuba::Point<Float, 3>, ScalarVector3f, mitsuba::Point<float, 3>,
+        AffineTransform4f, ScalarAffineTransform4f, ScalarAffineTransform3f,
+        mitsuba::Transform<mitsuba::Point<Float, 3>, true>>(type, dst, src);
+    if (!copied) {
+      TF_DEBUG(HDMITSUBA_SYNC)
+          .Msg("UpdateMaterialInPlace(%s): unsupported parameter type %s for "
+               "'%s' — falling back to rebuild\n",
+               spec.id.GetText(), type.name(), name.c_str());
+      return false;
+    }
+  }
+
+  // Notify children before parents, mirroring how Mitsuba's own parameter
+  // update flow propagates changes. Each object gets its full parameter name
+  // list as the keys: several plugins (e.g. the principled BSDF's
+  // eta/specular derivation) only re-derive state for named keys and would
+  // skip recomputation entirely on an empty list.
+  ObjectHierarchyCollector hierarchy(bsdf);
+  for (auto it = hierarchy.objects.rbegin(); it != hierarchy.objects.rend();
+       ++it) {
+    it->first->parameters_changed(it->second);
+  }
+  return true;
+}
 
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
