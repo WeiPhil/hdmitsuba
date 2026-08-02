@@ -79,9 +79,6 @@ class HdMitsubaMesh final : public HdMesh {
 
   void RemoveFromScene(SceneManager* scene);
 
-  absl::flat_hash_map<TfToken, HdPrimvarDescriptor, TfToken::HashFunctor>
-  GetAllPrimvarDescriptors(HdSceneDelegate* sceneDelegate);
-
   size_t instance_count_ = 0;
   bool in_scene_ = false;
 };
