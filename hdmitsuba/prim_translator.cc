@@ -673,6 +673,126 @@ bool TraversalTypeIs(const std::type_info& type) {
 
 }  // namespace
 
+
+namespace {
+
+// Notifies an object tree children-first, passing each object's full
+// parameter-name list (several plugins skip recomputation for unnamed keys).
+void NotifyParametersChangedChildrenFirst(mitsuba::Object* root) {
+  ObjectHierarchyCollector hierarchy(root);
+  for (auto it = hierarchy.objects.rbegin(); it != hierarchy.objects.rend();
+       ++it) {
+    it->first->parameters_changed(it->second);
+  }
+}
+
+}  // namespace
+
+MI_VARIANT
+typename PrimTranslator<Float, Spectrum>::MaterialParamSlots
+PrimTranslator<Float, Spectrum>::ResolveMaterialParamSlots(
+    mitsuba::Object* bsdf) {
+  MaterialParamSlots result;
+  TraversalCallback cb;
+  bsdf->traverse(&cb);
+  result.slots.reserve(cb.data.size());
+  for (const auto& [name, entry] : cb.data) {
+    result.slots.emplace_back(name, entry.first, &entry.second);
+  }
+  ObjectHierarchyCollector hierarchy(bsdf);
+  result.notify_order.assign(hierarchy.objects.rbegin(),
+                             hierarchy.objects.rend());
+  return result;
+}
+
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::ApplyMaterialParamValues(
+    const MaterialParamSlots& resolved,
+    const std::vector<std::pair<std::string, VtValue>>& changes) {
+  using Color3f = mitsuba::Color<Float, 3>;
+  using ScalarColor3f = mitsuba::Color<float, 3>;
+
+  struct Write {
+    void* dst;
+    const std::type_info* type;
+    VtValue value;
+  };
+  std::vector<Write> writes;
+  writes.reserve(changes.size());
+
+  for (const auto& [suffix, value] : changes) {
+    void* dst = nullptr;
+    const std::type_info* type = nullptr;
+    for (const auto& [name, ptr, type_info] : resolved.slots) {
+      if (name.size() >= suffix.size() &&
+          name.compare(name.size() - suffix.size(), suffix.size(), suffix) ==
+              0) {
+        if (dst != nullptr) {
+          return false;  // Ambiguous: more than one slot matches.
+        }
+        dst = ptr;
+        type = type_info;
+      }
+    }
+    if (dst == nullptr) {
+      return false;  // No slot for this parameter on the live material.
+    }
+    writes.push_back({dst, type, value});
+  }
+
+  // Validate all conversions before writing anything.
+  for (const Write& w : writes) {
+    const bool color_slot = (*w.type == typeid(Color3f)) ||
+                            (*w.type == typeid(ScalarColor3f));
+    const bool float_slot = (*w.type == typeid(Float)) ||
+                            (*w.type == typeid(float)) ||
+                            (*w.type == typeid(double));
+    const VtValue& value = w.value;
+    if (color_slot &&
+        !(value.IsHolding<GfVec3f>() || value.IsHolding<GfVec4f>())) {
+      return false;
+    }
+    if (float_slot &&
+        !(value.IsHolding<float>() || value.IsHolding<double>())) {
+      return false;
+    }
+    if (!color_slot && !float_slot) {
+      return false;
+    }
+  }
+
+  for (const Write& w : writes) {
+    const VtValue& value = w.value;
+    if (value.IsHolding<GfVec3f>() || value.IsHolding<GfVec4f>()) {
+      GfVec3f c = value.IsHolding<GfVec3f>()
+                      ? value.UncheckedGet<GfVec3f>()
+                      : GfVec3f(value.UncheckedGet<GfVec4f>()[0],
+                                value.UncheckedGet<GfVec4f>()[1],
+                                value.UncheckedGet<GfVec4f>()[2]);
+      if (*w.type == typeid(Color3f)) {
+        *static_cast<Color3f*>(w.dst) = Color3f(c[0], c[1], c[2]);
+      } else {
+        *static_cast<ScalarColor3f*>(w.dst) = ScalarColor3f(c[0], c[1], c[2]);
+      }
+    } else {
+      const float v = value.IsHolding<float>()
+                          ? value.UncheckedGet<float>()
+                          : static_cast<float>(value.UncheckedGet<double>());
+      if (*w.type == typeid(Float)) {
+        *static_cast<Float*>(w.dst) = Float(v);
+      } else if (*w.type == typeid(float)) {
+        *static_cast<float*>(w.dst) = v;
+      } else {
+        *static_cast<double*>(w.dst) = v;
+      }
+    }
+  }
+
+  for (const auto& [object, keys] : resolved.notify_order) {
+    object->parameters_changed(keys);
+  }
+  return true;
+}
+
 MI_VARIANT bool PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
     mitsuba::Object* bsdf, const MaterialSpec& spec,
     const TextureCache& texture_cache) {
@@ -741,11 +861,7 @@ MI_VARIANT bool PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
   // list as the keys: several plugins (e.g. the principled BSDF's
   // eta/specular derivation) only re-derive state for named keys and would
   // skip recomputation entirely on an empty list.
-  ObjectHierarchyCollector hierarchy(bsdf);
-  for (auto it = hierarchy.objects.rbegin(); it != hierarchy.objects.rend();
-       ++it) {
-    it->first->parameters_changed(it->second);
-  }
+  NotifyParametersChangedChildrenFirst(bsdf);
   return true;
 }
 

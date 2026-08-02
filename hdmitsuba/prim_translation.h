@@ -25,6 +25,7 @@
 
 #include <string>
 
+#include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/types.h>
@@ -52,6 +53,12 @@ struct CameraTranslationState {
   std::string sensor_type;
   std::string film_pixel_filter_type;
 };
+
+// Whether replacing `prev` with `next` on a live material can change
+// construction-time specialization (feature gates baked from 0/1/all-zero
+// values, type or string changes) — such changes require a rebuild rather
+// than an in-place value write.
+bool MaterialParamChangeIsStructural(const VtValue& prev, const VtValue& next);
 
 // Translates the material prim at `id` and syncs it into `scene_manager`.
 void TranslateMaterialPrim(const HdSceneIndexBaseRefPtr& scene_index,
