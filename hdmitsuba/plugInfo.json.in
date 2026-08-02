@@ -9,6 +9,14 @@
                         ],
                         "displayName": "Mitsuba",
                         "priority": 99
+                    },
+                    "HdMitsubaExtComputationPrimvarPruningSceneIndexPlugin": {
+                        "bases": [
+                            "HdSceneIndexPlugin"
+                        ],
+                        "displayName": "Mitsuba ext computation primvar pruning",
+                        "priority": 0,
+                        "loadWithRenderer": "Mitsuba"
                     }
                 }
             },

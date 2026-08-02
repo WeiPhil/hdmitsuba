@@ -27,7 +27,6 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/bprim.h>
-#include <pxr/imaging/hd/extComputation.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
@@ -71,7 +70,7 @@ const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedSprimTypes() const {
       HdPrimTypeTokens->camera,    HdPrimTypeTokens->sphereLight,
       HdPrimTypeTokens->domeLight, HdPrimTypeTokens->distantLight,
       HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight,
-      HdPrimTypeTokens->material,  HdPrimTypeTokens->extComputation,
+      HdPrimTypeTokens->material,
   };
   return *kSupportedSprimTypes;
 }
@@ -155,8 +154,6 @@ HdSprim* HdMitsubaRenderDelegate::CreateSprim(const TfToken& typeId,
     return new HdMitsubaLight(sprimId, typeId);
   } else if (typeId == HdPrimTypeTokens->material) {
     return new HdMitsubaMaterial(sprimId);
-  } else if (typeId == HdPrimTypeTokens->extComputation) {
-    return new HdExtComputation(sprimId);
   }
   return nullptr;
 }

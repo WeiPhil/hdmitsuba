@@ -235,7 +235,27 @@ def test_modify_curve_transform_only():
       output_prefix='test_modify_curve_transform_only',
       atol=0.05,
       engine=engine,
-  )
   assert (
       np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
   )
+
+
+def test_skinned_mesh_time_scrub():
+  """Skinned points update when the same engine re-renders at another time.
+
+  UsdSkel skinning reaches the delegate as plain `points` primvars: the
+  ext-computation pruning scene index (appended for the Mitsuba renderer by
+  the render index) evaluates the skinning computations, and invalidation on
+  time change must flow through it.
+  """
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/skinned_mesh.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(160, 160))
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_start = engine.render(Usd.TimeCode(1))['color']
+  image_end = engine.render(Usd.TimeCode(20))['color']
+  assert (
+      np.mean(np.abs(image_end[..., :3] - image_start[..., :3])) > 0.005
+  ), 'Skinned mesh did not deform between time codes with the same engine.'

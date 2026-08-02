@@ -79,6 +79,11 @@ The pieces involved are:
     legacy delegate used to read them directly from the USD stage). The plugin
     is discovered through `PXR_PLUGINPATH_NAME`; `build/setpath.sh` sets this
     up automatically.
+*   **Scene index plugin**: `HdMitsubaExtComputationPrimvarPruningSceneIndexPlugin`
+    is registered for the Mitsuba renderer and appended by the render index
+    itself in every scene-index host; it evaluates ext computations (UsdSkel
+    skinning) and presents the results as plain primvars, so the delegate
+    contains no ext-computation code.
 *   **Render delegate**: materials are resolved per terminal across render
     contexts (a universal preview surface can be mixed with
     `outputs:mitsuba:*` terminals), and
