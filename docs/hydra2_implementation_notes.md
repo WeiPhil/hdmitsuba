@@ -285,3 +285,19 @@ Remaining prim-path surface after this change: mesh/curves/instancer
 translation (per-prim subdivision state and instancing composition), and
 the rprim layer that render passes and collections require. Migrating
 meshes is the natural next step.
+
+## Clay mode: a worked example of scene-level composability
+
+`HdMitsubaClaySceneIndex` (scene_index_plugin.cc, enabled with
+`HDMITSUBA_CLAY=1`) is a deliberately minimal demonstration of what the
+scene-index pipeline makes possible, using both fundamental filter
+operations: it *hides* every non-emissive material's data source (materials
+driving emission pass through, so mesh lights keep lighting the clay
+scene), and it *overlays* a constant 18%-gray `displayColor` primvar onto
+mesh/curve data sources — because scene color does not only come from
+materials: Kitchen_set contains zero material prims and is shaded entirely
+through displayColor. The delegate needed zero changes: its existing
+empty-network → fallback-BSDF and displayColor paths do the rest. The
+Hydra 1.0 equivalents were editing the USD document or hacking
+per-renderer material code; as a filter this is a reusable, composable
+scene operation that would clay any renderer it is registered for.

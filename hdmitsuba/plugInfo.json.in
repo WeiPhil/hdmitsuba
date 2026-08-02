@@ -17,7 +17,13 @@
                         "displayName": "Mitsuba ext computation primvar pruning",
                         "priority": 0,
                         "loadWithRenderer": "Mitsuba"
-                    }
+                    },
+                "HdMitsubaClaySceneIndexPlugin": {
+                    "bases": ["HdSceneIndexPlugin"],
+                    "displayName": "Mitsuba clay-mode scene index",
+                    "priority": 0,
+                    "loadWithRenderer": "Mitsuba"
+                }
                 }
             },
             "LibraryPath": "@PLUG_INFO_LIBRARY_PATH@",
