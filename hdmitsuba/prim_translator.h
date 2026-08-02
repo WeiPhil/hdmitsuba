@@ -69,7 +69,11 @@ class PrimTranslator {
 
   static TranslatedMaterial BuildMaterial(const MaterialSpec& spec,
                                           const TextureCache& texture_cache);
-  static void UpdateMaterialInPlace(mitsuba::Object* bsdf,
+  // Applies a parameter-values-only material edit to the existing Mitsuba
+  // BSDF via its traversal interface (building a translated twin as the
+  // value source). Returns false when the update cannot be applied
+  // faithfully; the caller must then rebuild the material.
+  static bool UpdateMaterialInPlace(mitsuba::Object* bsdf,
                                     const MaterialSpec& spec,
                                     const TextureCache& texture_cache);
   static mitsuba::ref<mitsuba::Object> LoadTexture(

@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from pxr import Gf
+from pxr import Sdf
 from pxr import Usd
 from pxr import UsdShade
 import usd_render
@@ -140,3 +141,80 @@ def test_modify_material():
   diffuse_color.GetAttr().Clear()
   image_reset = engine.render()['color']
   test_helpers.robust_assert_close(image_reset, image_original, atol=0.05)
+
+
+def test_modify_material_value_in_place():
+  """Value-only edits update the Mitsuba BSDF in place.
+
+  Editing only parameter values (colors, roughness) keeps the material's
+  network structure unchanged, so the delegate applies the edit to the
+  existing Mitsuba BSDF instead of rebuilding it. The rendered result must be
+  indistinguishable from a from-scratch render of the edited stage.
+  """
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/shapes/cube.usda')
+  # cube.usda binds /root/_materials/Material on the mesh prim itself; edit
+  # that material's inputs so the edit is visible in the render.
+  pbr = UsdShade.Shader.Get(
+      stage, '/root/_materials/Material/Principled_BSDF'
+  )
+  assert pbr
+  session_layer = stage.GetSessionLayer()
+  stage.SetEditTarget(session_layer)
+  color = pbr.GetInput('diffuseColor')
+  assert color
+  roughness = pbr.CreateInput('roughness', Sdf.ValueTypeNames.Float)
+  roughness.Set(0.9)
+  test_helpers.create_render_settings(stage, resolution=(160, 160))
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_original = engine.render()['color']
+
+  color.Set(Gf.Vec3f(0.1, 0.2, 0.9))
+  roughness.Set(0.2)
+  image_edited = engine.render()['color']
+  assert np.mean(np.abs(image_edited - image_original)) > 0.01
+
+  fresh_engine = usd_render.RenderEngine(stage)
+  fresh_engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+  image_fresh = fresh_engine.render()['color']
+  np.testing.assert_allclose(image_edited, image_fresh, atol=1e-4, rtol=1e-4)
+def test_texture_color_space_via_network_schema():
+  """The resolved color space reaches the translator via the network schema.
+
+  In scene-index mode the UsdUVTexture sourceColorSpace input is folded by
+  UsdImaging into the file parameter's colorSpace field of the Hydra 2.0
+  material network schema (the parameter itself no longer appears in the
+  network). An explicit "raw" must suppress the sRGB->linear decode on a
+  color input, which brightens the texture relative to the sRGB
+  interpretation.
+  """
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/materials/materials.usda'
+  )
+  test_helpers.create_render_settings(stage)
+  camera_path = '/root/Camera/Camera'
+
+  engine_srgb = usd_render.RenderEngine(stage)
+  engine_srgb.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path=camera_path
+  )
+  image_srgb = engine_srgb.render()['color']
+
+  session_layer = stage.GetSessionLayer()
+  stage.SetEditTarget(session_layer)
+  texture = UsdShade.Shader.Get(
+      stage, '/root/_materials/textured/Image_Texture'
+  )
+  assert texture
+  texture.GetInput('sourceColorSpace').Set('raw')
+
+  engine_raw = usd_render.RenderEngine(stage)
+  engine_raw.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', camera_path=camera_path
+  )
+  image_raw = engine_raw.render()['color']
+
+  assert np.mean(np.abs(image_raw - image_srgb)) > 1e-4
+  # Raw loading skips the sRGB->linear decode, which brightens the texture.
+  assert np.mean(image_raw) > np.mean(image_srgb)

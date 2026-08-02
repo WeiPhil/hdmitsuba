@@ -84,6 +84,31 @@ environment).
   full pytest suite, fuzzing and the usdview compliance driver showed the
   only reachable "fallbacks" were the miss paths for genuinely absent
   data.
+- Material edits that only change parameter *values* (colors, roughness —
+  same nodes, connections, terminals and file/string parameters) now update
+  the existing Mitsuba BSDF **in place** through its traversal interface: a
+  freshly translated twin supplies the values (identical structure ⇒
+  identical traversal layout), children get `parameters_changed()` before
+  parents, and any parameter that cannot be copied faithfully falls back to
+  a full rebuild — an in-place update is never silently wrong. The pre-Hydra
+  2.0 scaffolding for this (the `dirty_bits` path in the scene manager and
+  an empty `UpdateMaterialInPlace` stub) is now live. Verified equivalent to
+  a from-scratch render (max abs diff ~4e-7) with kernel freezing both off
+  and on — frozen kernels stay valid across interactive material tweaks.
+  Two guards found by the fuzzing suite: value changes touching the 0/1
+  boundaries (or flipping bools/ints, or crossing an all-zero color) count
+  as structural, because Mitsuba plugins bake feature gates at construction
+  from exactly those values (`has_metallic`, opacity handling, ...) and the
+  gates are invisible to traversal; and `parameters_changed()` receives each
+  object's full parameter-name list as keys, since several plugins (e.g. the
+  principled BSDF's eta/specular derivation) skip recomputation for keys not
+  named.
+- Texture color spaces are driven by the network schema's per-parameter
+  `colorSpace` field (UsdImaging folds the UsdUVTexture `sourceColorSpace`
+  input into it; the parameter itself no longer appears in scene-index
+  networks, so the old parameter-based read silently degraded to input-name
+  heuristics for everything). An explicit `raw`/`sRGB` from the schema now
+  overrides the heuristic when loading bitmaps.
 - Ext computations (UsdSkel skinning) are no longer evaluated in the
   delegate: `scene_index_plugin.cc` registers
   `HdMitsubaExtComputationPrimvarPruningSceneIndexPlugin`
