@@ -53,6 +53,18 @@ class SceneManager {
   virtual void SyncLight(LightSpec spec) = 0;
   virtual void SyncMaterial(MaterialSpec spec) = 0;
 
+  // Fast path for interactive value-only material edits (native scene index
+  // backend): writes the given parameter values directly onto the live
+  // Mitsuba BSDF (no twin translation, no rebuild) and patches the stored
+  // spec's network so later diffs and variant switches see current values.
+  // `changes` maps USD parameter names on `node_path` to new values.
+  // Returns false — writing nothing — when the material has no live BSDF or
+  // any value cannot be mapped/converted; the caller falls back to a full
+  // SyncMaterial.
+  virtual bool UpdateMaterialValues(
+      const SdfPath& id, const SdfPath& node_path,
+      const std::vector<std::pair<TfToken, VtValue>>& changes) = 0;
+
   // Read access to the synced prim specs. The specs are plain (Mitsuba
   // variant independent) data, so they can be moved between scene managers
   // of different variants.

@@ -28,6 +28,7 @@
 #include <variant>
 #include <vector>
 
+#include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/match.h>
@@ -705,6 +706,78 @@ class SceneModel final : public SceneManager {
     }
     light_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;
+  }
+
+  bool UpdateMaterialValues(
+      const SdfPath& id, const SdfPath& node_path,
+      const std::vector<std::pair<TfToken, VtValue>>& changes) override {
+    // USD parameter -> Mitsuba traversal-name suffix, for parameters whose
+    // value maps 1:1 onto a live principled-BSDF slot. Anything else falls
+    // back to the twin-based update.
+    static const absl::NoDestructor<
+        absl::flat_hash_map<TfToken, std::string, TfToken::HashFunctor>>
+        kParamToTraversalSuffix({
+            {TfToken("diffuseColor"), "base_color.value"},
+            {TfToken("roughness"), "roughness.value"},
+            {TfToken("metallic"), "metallic.value"},
+        });
+
+    absl::MutexLock lock(state_mutex_);
+    auto bsdf_it = bsdfs_.find(id.GetAsString());
+    if (bsdf_it == bsdfs_.end()) {
+      return false;
+    }
+    auto spec_it = material_specs_.find(id);
+    if (spec_it == material_specs_.end() || spec_it->second.needs_rebuild ||
+        spec_it->second.dirty_bits != 0) {
+      // A pending full sync supersedes a targeted write.
+      return false;
+    }
+    auto node_it = spec_it->second.network2.nodes.find(node_path);
+    if (node_it == spec_it->second.network2.nodes.end()) {
+      return false;
+    }
+
+    std::vector<std::pair<std::string, VtValue>> writes;
+    writes.reserve(changes.size());
+    for (const auto& [param, value] : changes) {
+      auto map_it = kParamToTraversalSuffix->find(param);
+      if (map_it == kParamToTraversalSuffix->end()) {
+        return false;
+      }
+      writes.emplace_back(map_it->second, value);
+    }
+
+    {
+      JitScopeGuard<Float> jit_guard;
+      // Slot resolution walks the object tree; cache it per material and
+      // invalidate whenever the live BSDF object changes (rebuilds).
+      auto cache_it = material_param_slots_.find(id.GetAsString());
+      if (cache_it == material_param_slots_.end() ||
+          cache_it->second.first != bsdf_it->second.get()) {
+        cache_it = material_param_slots_
+                       .insert_or_assign(
+                           id.GetAsString(),
+                           std::make_pair(
+                               static_cast<const mitsuba::Object*>(
+                                   bsdf_it->second.get()),
+                               PrimTranslator::ResolveMaterialParamSlots(
+                                   bsdf_it->second.get())))
+                       .first;
+      }
+      if (!PrimTranslator::ApplyMaterialParamValues(cache_it->second.second,
+                                                    writes)) {
+        return false;
+      }
+    }
+
+    // Keep the stored network current so later structural diffs and
+    // variant-switch reseeding see the live values.
+    for (const auto& [param, value] : changes) {
+      node_it->second.parameters[param] = value;
+    }
+    reset_progressive_ = true;
+    return true;
   }
 
   void SyncMaterial(MaterialSpec spec) override {
@@ -1774,6 +1847,11 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
   absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
+  absl::flat_hash_map<
+      std::string,
+      std::pair<const mitsuba::Object*,
+                typename PrimTranslator::MaterialParamSlots>>
+      material_param_slots_;
   absl::flat_hash_map<std::string, ref<Texture>> displacement_textures_;
   absl::flat_hash_map<std::string, mitsuba::Properties> material_emitters_;
   ref<BSDF> default_bsdf_ = nullptr;

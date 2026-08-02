@@ -73,6 +73,33 @@ class PrimTranslator {
   // BSDF via its traversal interface (building a translated twin as the
   // value source). Returns false when the update cannot be applied
   // faithfully; the caller must then rebuild the material.
+  // Resolved write slots and notification order for targeted material
+  // parameter updates. Valid while the material's object structure is
+  // unchanged (the same lifetime the in-place update guards guarantee);
+  // rebuilds must discard it.
+  struct MaterialParamSlots {
+    // Traversal-name suffix -> (destination, type).
+    std::vector<std::tuple<std::string, void*, const std::type_info*>> slots;
+    // Children-first notification order with full parameter-name lists.
+    std::vector<std::pair<mitsuba::Object*, std::vector<std::string>>>
+        notify_order;
+  };
+
+  // Walks the live material once and resolves everything ApplyParamValues
+  // needs. Cache the result per material; invalidate on rebuild.
+  static MaterialParamSlots ResolveMaterialParamSlots(mitsuba::Object* bsdf);
+
+  // Writes individual parameter values onto the live material without
+  // building a twin: each entry maps a Mitsuba traversal-name suffix (e.g.
+  // "base_color.value") to its new value. All slots are resolved before any
+  // write; returns false (writing nothing) if any slot is missing,
+  // ambiguous, or of an unsupported type — the caller then falls back to a
+  // full rebuild path. On success the object tree is notified
+  // children-first with full parameter-name lists.
+  static bool ApplyMaterialParamValues(
+      const MaterialParamSlots& slots,
+      const std::vector<std::pair<std::string, VtValue>>& changes);
+
   static bool UpdateMaterialInPlace(mitsuba::Object* bsdf,
                                     const MaterialSpec& spec,
                                     const TextureCache& texture_cache);

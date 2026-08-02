@@ -260,6 +260,17 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
 }
 
 
+bool MaterialParamChangeIsStructural(const VtValue& prev,
+                                     const VtValue& next) {
+  if (prev.GetTypeid() != next.GetTypeid()) {
+    return true;
+  }
+  if (IsStructuralValue(prev) || IsStructuralValue(next)) {
+    return prev != next;
+  }
+  return IsSpecializingValueChange(prev, next);
+}
+
 void TranslateMaterialPrim(const HdSceneIndexBaseRefPtr& scene_index,
                            const SdfPath& id, MaterialTranslationState* state,
                            SceneManager* scene_manager) {

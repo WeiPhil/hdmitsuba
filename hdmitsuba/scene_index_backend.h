@@ -31,6 +31,7 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/synchronization/mutex.h>
 #include <pxr/imaging/hd/sceneIndex.h>
+#include <pxr/imaging/hd/dataSourceLocator.h>
 #include <pxr/imaging/hd/sceneIndexObserver.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
@@ -81,12 +82,20 @@ class HdMitsubaSceneIndexBackend {
   void TranslatePrim(const SdfPath& id, const TfToken& prim_type,
                      SceneManager* scene_manager);
 
+  // Locator-gated fast path: for a value-only edit on a single material
+  // node, patches the changed parameters straight onto the live BSDF and
+  // the cached network, skipping full translation and the twin build.
+  // Returns false when anything about the edit is not provably value-only.
+  bool TryFastMaterialUpdate(const SdfPath& id,
+                             const HdDataSourceLocatorSet& locators,
+                             SceneManager* scene_manager);
+
   HdSceneIndexBaseRefPtr terminal_scene_index_;
   std::unique_ptr<Observer> observer_;
 
   mutable absl::Mutex queue_mutex_;
   std::vector<std::pair<SdfPath, TfToken>> pending_added_;
-  std::vector<SdfPath> pending_dirtied_;
+  std::vector<std::pair<SdfPath, HdDataSourceLocatorSet>> pending_dirtied_;
   std::vector<SdfPath> pending_removed_;
 
   mutable absl::Mutex claimed_mutex_;
