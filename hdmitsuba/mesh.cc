@@ -42,6 +42,7 @@
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/pxOsd/tokens.h>
@@ -89,9 +90,37 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
   }
 }
 
+// Reads a custom (non-schema) attribute value for a prim.
+//
+// Hydra 2.0: when the scene is fed by the UsdImagingStageSceneIndex, custom
+// `mitsuba:*` attributes are published as top-level entries of the prim's
+// container data source by the keyless UsdImagingMitsubaAttributesAdapter
+// (see usd_imaging_mitsuba/adapter.cc), so we look them up on the render
+// index's terminal scene index first. When running behind the legacy
+// UsdImagingDelegate, the data source lookup misses and we fall back to
+// HdSceneDelegate::Get(), which reads the USD attribute directly.
+VtValue GetCustomPrimValue(HdSceneDelegate* sceneDelegate, const SdfPath& id,
+                           const TfToken& key) {
+  if (HdSceneIndexBaseRefPtr scene_index =
+          sceneDelegate->GetRenderIndex().GetTerminalSceneIndex()) {
+    if (HdContainerDataSourceHandle data_source =
+            scene_index->GetPrim(id).dataSource) {
+      if (HdSampledDataSourceHandle sampled =
+              HdSampledDataSource::Cast(data_source->Get(key))) {
+        VtValue value = sampled->GetValue(0.0f);
+        if (!value.IsEmpty()) {
+          return value;
+        }
+      }
+    }
+  }
+  return VtValue();
+}
+
 std::optional<SdfPath> GetAttachedSensorId(HdSceneDelegate* sceneDelegate,
                                            const SdfPath& id) {
-  VtValue attached_sensor = sceneDelegate->Get(id, TfToken("mitsuba:sensor"));
+  VtValue attached_sensor =
+      GetCustomPrimValue(sceneDelegate, id, TfToken("mitsuba:sensor"));
   if (attached_sensor.IsHolding<SdfPath>()) {
     return attached_sensor.Get<SdfPath>();
   } else if (attached_sensor.IsHolding<std::string>()) {
@@ -218,8 +247,8 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate) {
   const HdDisplayStyle display_style = GetDisplayStyle(sceneDelegate);
 
   int refineLevel = display_style.refineLevel;
-  VtValue subdivLevelValue =
-      sceneDelegate->Get(GetId(), HdMitsubaMeshTokens->subdivision_level);
+  VtValue subdivLevelValue = GetCustomPrimValue(
+      sceneDelegate, GetId(), HdMitsubaMeshTokens->subdivision_level);
   if (!subdivLevelValue.IsEmpty() && subdivLevelValue.IsHolding<int>()) {
     refineLevel = subdivLevelValue.Get<int>();
   }

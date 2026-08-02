@@ -272,6 +272,13 @@ TfTokenVector HdMitsubaRenderDelegate::GetMaterialRenderContexts() const {
   return {TfToken("mitsuba")};
 }
 
+TfTokenVector HdMitsubaRenderDelegate::GetRenderSettingsNamespaces() const {
+  // Hydra 2.0: HdsiRenderSettingsFilteringSceneIndex uses these prefixes to
+  // decide which namespaced settings authored on RenderSettings prims are
+  // forwarded to the renderSettings bprim (HdMitsubaRenderSettings).
+  return {TfToken("mitsuba")};
+}
+
 TfToken HdMitsubaRenderDelegate::GetMaterialBindingPurpose() const {
   return HdTokens->full;
 }

@@ -42,7 +42,6 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/tokens.h>
-#include <pxr/usdImaging/usdImaging/delegate.h>
 
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/tests/test_util.h"
@@ -144,14 +143,6 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelAttribute) {
   usd_mesh.CreateFaceVertexIndicesAttr(pxr::VtValue(face_indices));
   usd_mesh.CreateSubdivisionSchemeAttr().Set(pxr::UsdGeomTokens->catmullClark);
 
-  auto [render_delegate, render_index, scene_delegate, scene_manager,
-        render_param] = CreateRenderDelegateStateObjects<Scene>();
-
-  scene_delegate->Populate(stage->GetPseudoRoot());
-
-  pxr::HdMitsubaMesh mitsuba_mesh(mesh_path);
-  pxr::HdDirtyBits dirty_bits = pxr::HdChangeTracker::AllDirty;
-
   // By default, refinement level is 0 if not specified in DisplayStyle.
   // We'll set it to 1 via the attribute.
   usd_mesh.GetPrim()
@@ -159,8 +150,12 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelAttribute) {
                        pxr::SdfValueTypeNames->Int)
       .Set(1);
 
-  mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
-                    pxr::HdReprTokens->hull);
+  // Create the Hydra 2.0 (scene index) harness for the stage; this images the
+  // stage through the UsdImagingStageSceneIndex chain (the
+  // mitsuba:subdivision_level attribute is published by the
+  // UsdImagingMitsubaAttributesAdapter) and syncs all prims.
+  SceneIndexTestHarness harness = CreateSceneIndexTestHarness(stage);
+  SceneManager* scene_manager = harness.scene_manager;
 
   scene_manager->CommitResources();
   Scene* scene = dynamic_cast<Scene*>(scene_manager->GetScene());
@@ -173,10 +168,6 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelAttribute) {
   // A single quad subdivided at level 1 Catmull-Clark should result in 4 quads.
   // These are triangulated into 8 triangles.
   EXPECT_EQ(mitsuba_mesh_obj->face_count(), 8);
-
-  scene_delegate.reset();
-  render_index.reset();
-  render_delegate.reset();
 }
 
 TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
@@ -194,22 +185,16 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
   usd_mesh.CreateFaceVertexIndicesAttr(pxr::VtValue(face_indices));
   usd_mesh.CreateSubdivisionSchemeAttr().Set(pxr::UsdGeomTokens->catmullClark);
 
-  auto [render_delegate, render_index, scene_delegate, scene_manager,
-        render_param] = CreateRenderDelegateStateObjects<Scene>();
-
-  scene_delegate->Populate(stage->GetPseudoRoot());
-
-  pxr::HdMitsubaMesh mitsuba_mesh(mesh_path);
-  pxr::HdDirtyBits dirty_bits = pxr::HdChangeTracker::AllDirty;
-
   // Set initial level to 1.
   usd_mesh.GetPrim()
       .CreateAttribute(pxr::TfToken("mitsuba:subdivision_level"),
                        pxr::SdfValueTypeNames->Int)
       .Set(1);
 
-  mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
-                    pxr::HdReprTokens->hull);
+  // Create the Hydra 2.0 (scene index) harness for the stage.
+  SceneIndexTestHarness harness = CreateSceneIndexTestHarness(stage);
+  SceneManager* scene_manager = harness.scene_manager;
+
   scene_manager->CommitResources();
 
   {
@@ -223,14 +208,11 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
       .GetAttribute(pxr::TfToken("mitsuba:subdivision_level"))
       .Set(2);
 
-  // In a real scenario, UsdImaging would mark this as dirty.
-  // We'll simulate it by manually marking it dirty in the render index.
-  render_index->GetChangeTracker().MarkRprimDirty(
-      mesh_path, pxr::HdChangeTracker::DirtyPrimvar);
-
-  dirty_bits = render_index->GetChangeTracker().GetRprimDirtyBits(mesh_path);
-  mitsuba_mesh.Sync(scene_delegate.get(), render_param, &dirty_bits,
-                    pxr::HdReprTokens->hull);
+  // Propagate the USD edit through the scene index chain and re-sync. This
+  // exercises UsdImagingMitsubaAttributesAdapter::InvalidateImagingSubprim
+  // end-to-end: the attribute change must dirty the mesh so that the new
+  // subdivision level is picked up.
+  harness.Sync();
   scene_manager->CommitResources();
 
   {
@@ -239,10 +221,6 @@ TEST(HdMitsubaMeshTest, SubdivisionLevelReactivity) {
     // At level 2, 1 quad -> 16 quads -> 32 triangles.
     EXPECT_EQ(mitsuba_mesh_obj->face_count(), 32);
   }
-
-  scene_delegate.reset();
-  render_index.reset();
-  render_delegate.reset();
 }
 
 }  // namespace

@@ -60,19 +60,11 @@ TEST(HdMitsubaCameraTest, Sync) {
   camera.GetVerticalApertureAttr().Set(24.0f);
   camera.GetClippingRangeAttr().Set(GfVec2f(0.5f, 50.0f));
 
-  // Create a scene delegate and populate it with the camera prim.
-  auto [render_delegate, render_index, scene_delegate, scene_manager,
-        render_param] = CreateRenderDelegateStateObjects<Scene>();
-
-  scene_delegate->Populate(stage->GetPseudoRoot());
-
-  // Check camera sync/conversion.
-  HdMitsubaCamera mitsuba_camera(camera_path);
-
-  HdDirtyBits dirty_bits = HdCamera::DirtyBits::AllDirty;
-
-  mitsuba_camera.Sync(scene_delegate.get(), render_param, &dirty_bits);
-  EXPECT_EQ(dirty_bits, HdChangeTracker::Clean);
+  // Create the Hydra 2.0 (scene index) harness for the stage; this images the
+  // stage through the UsdImagingStageSceneIndex chain and syncs all prims,
+  // including the camera sprim.
+  SceneIndexTestHarness harness = CreateSceneIndexTestHarness(stage);
+  SceneManager* scene_manager = harness.scene_manager;
 
   scene_manager->CommitResources();  // Creates the scene.
 
@@ -109,9 +101,6 @@ TEST(HdMitsubaCameraTest, Sync) {
   EXPECT_NEAR(matrix[3][0], 0.0f, kTolerance);
   EXPECT_NEAR(matrix[3][1], 0.0f, kTolerance);
   EXPECT_NEAR(matrix[3][2], 0.0f, kTolerance);
-  scene_delegate.reset();
-  render_index.reset();
-  render_delegate.reset();
 }
 
 }  // namespace

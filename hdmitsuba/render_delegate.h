@@ -75,6 +75,7 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
 
   TfToken GetMaterialBindingPurpose() const override;
   TfTokenVector GetMaterialRenderContexts() const override;
+  TfTokenVector GetRenderSettingsNamespaces() const override;
 
   HdAovDescriptor GetDefaultAovDescriptor(const TfToken& name) const override;
 

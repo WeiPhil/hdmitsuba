@@ -61,6 +61,38 @@ cmake -G Ninja \
 cmake --build build
 ```
 
+## Hydra 2.0 (Scene Index) Support
+
+`hdMitsuba` fully supports the Hydra 2.0 **scene index** front-end, which is
+the default in usdview/usdrecord since the pipeline switched over (the legacy
+`UsdImagingDelegate` path is deprecated in OpenUSD and prints a deprecation
+warning when forced via `USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX=0`).
+
+The pieces involved are:
+
+*   **`usd_imaging_mitsuba`**: a UsdImaging plugin containing a *keyless*
+    `UsdImagingAPISchemaAdapter` that publishes the custom `mitsuba:*` USD
+    attributes (`mitsuba:subdivision_level`, `mitsuba:sensor`,
+    `mitsuba:sensor:type`, ...) into the stage scene index, with matching
+    invalidation for interactive edits. The stage scene index is schema-driven,
+    so without this adapter those attributes would silently be dropped (the
+    legacy delegate used to read them directly from the USD stage). The plugin
+    is discovered through `PXR_PLUGINPATH_NAME`; `build/setpath.sh` sets this
+    up automatically.
+*   **Render delegate**: materials are resolved per terminal across render
+    contexts (a universal preview surface can be mixed with
+    `outputs:mitsuba:*` terminals), and
+    `HdRenderDelegate::GetRenderSettingsNamespaces()` forwards `mitsuba:*`
+    settings authored on `RenderSettings` prims in scene index mode.
+*   **`render_engine`**: images the stage through
+    `UsdImagingCreateSceneIndices` (with implicit-surface-to-mesh conversion
+    and display-style overrides). Set `HDMITSUBA_ENGINE_USE_SCENE_INDEX=false`
+    to fall back to the deprecated `UsdImagingDelegate` front-end, e.g. for
+    A/B comparisons.
+*   **C++ tests**: use a scene-index-based harness
+    (`tests/test_util.h:CreateSceneIndexTestHarness`) that mirrors the usdview
+    wiring, including end-to-end invalidation.
+
 ## Running Tests
 
 To run the tests, you must configure the environment so that USD can find the `hdMitsuba` plugin, and Python can find the built modules and dependencies.

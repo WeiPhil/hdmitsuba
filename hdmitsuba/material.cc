@@ -137,21 +137,65 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   if (!TF_VERIFY(scene_index)) {
     return;
   }
+  SceneManager* scene_manager =
+      static_cast<HdMitsubaRenderParam*>(render_param)->GetScene();
+
+  // Syncs an empty network, which rebuilds the material as the fallback BSDF.
+  // This matters when a previously valid network becomes empty (e.g. its
+  // surface output is disconnected interactively): the stale Mitsuba material
+  // must be replaced rather than kept.
+  auto sync_empty_network = [&]() {
+    MaterialSpec spec;
+    spec.id = id;
+    spec.needs_rebuild = true;
+    scene_manager->SyncMaterial(std::move(spec));
+    *dirty_bits = HdChangeTracker::Clean;
+  };
+
   HdMaterialSchema materialSchema =
       HdMaterialSchema::GetFromParent(scene_index->GetPrim(id).dataSource);
   if (!materialSchema.IsDefined()) {
+    sync_empty_network();
     return;
   }
-  HdMaterialNetworkSchema networkSchema = materialSchema.GetMaterialNetwork();
-  if (!networkSchema.IsDefined()) {
+  // Hydra 2.0: with the stage scene index front-end, the material data source
+  // holds one network per render context (e.g. "" universal from
+  // outputs:surface / outputs:displacement, "mitsuba" from
+  // outputs:mitsuba:surface / outputs:mitsuba:displacement). A material may
+  // mix contexts per terminal (e.g. a universal preview surface with a
+  // mitsuba-specific displacement), so resolution must happen per terminal:
+  // start from the universal network and overlay the "mitsuba" context's
+  // nodes and terminals on top. Behind the legacy pipeline the emulated data
+  // source only has the universal network (already resolved for our context
+  // by UsdImaging), so the overlay is a no-op there.
+  static const TfToken kMitsubaRenderContext("mitsuba");
+  HdMaterialNetworkSchema universal_schema =
+      materialSchema.GetMaterialNetwork();
+  HdMaterialNetworkSchema mitsuba_schema =
+      materialSchema.GetMaterialNetwork(kMitsubaRenderContext);
+  if (!universal_schema.IsDefined() && !mitsuba_schema.IsDefined()) {
+    sync_empty_network();
     return;
   }
 
-  SceneManager* scene_manager =
-      static_cast<HdMitsubaRenderParam*>(render_param)->GetScene();
+  HdMaterialNetwork2 network;
+  if (universal_schema.IsDefined()) {
+    network = ConvertMaterialNetwork(universal_schema);
+  }
+  if (mitsuba_schema.IsDefined()) {
+    HdMaterialNetwork2 mitsuba_network =
+        ConvertMaterialNetwork(mitsuba_schema);
+    for (auto& [path, node] : mitsuba_network.nodes) {
+      network.nodes[path] = std::move(node);
+    }
+    for (const auto& [terminal, connection] : mitsuba_network.terminals) {
+      network.terminals[terminal] = connection;
+    }
+  }
+
   MaterialSpec spec;
   spec.id = id;
-  spec.network2 = ConvertMaterialNetwork(networkSchema);
+  spec.network2 = std::move(network);
   spec.needs_rebuild = true;
   scene_manager->SyncMaterial(std::move(spec));
   *dirty_bits = HdChangeTracker::Clean;

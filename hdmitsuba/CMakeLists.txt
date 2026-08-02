@@ -152,7 +152,10 @@ if(HDMITSUBA_BUILD_TESTS)
       target_link_libraries(${Name} PRIVATE ${DRJIT_EXTRA_LIBRARY})
     endif()
     add_test(NAME ${Name} COMMAND ${Name})
-    set_tests_properties(${Name} PROPERTIES ENVIRONMENT "HDMITSUBA_VARIANT=scalar_rgb")
+    # The usd_imaging_mitsuba plugin path makes the Hydra 2.0 keyless API
+    # schema adapter (custom mitsuba:* attributes) discoverable in tests.
+    set_tests_properties(${Name} PROPERTIES ENVIRONMENT
+      "HDMITSUBA_VARIANT=scalar_rgb;PXR_PLUGINPATH_NAME=${CMAKE_BINARY_DIR}/usd_imaging_mitsuba")
   endfunction()
 
   add_hdmitsuba_test(camera_test tests/camera_test.cc)

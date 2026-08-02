@@ -26,10 +26,23 @@
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/thread.h>
 #include <mitsuba/core/util.h>
+#include <map>
+
+#include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/renderIndex.h>
+#include <pxr/imaging/hd/renderPass.h>
+#include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/rprimCollection.h>
+#include <pxr/imaging/hd/task.h>
+#include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
+#include <pxr/usd/usd/stage.h>
 #include <pxr/usdImaging/usdImaging/delegate.h>
+#include <pxr/usdImaging/usdImaging/sceneIndices.h>
+#include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
+
+#include "hdmitsuba/render_delegate.h"
 
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
@@ -81,6 +94,115 @@ CreateRenderDelegateStateObjects() {
   return std::make_tuple(std::move(render_delegate), std::move(render_index),
                          std::move(scene_delegate), scene_manager,
                          render_param);
+}
+
+// Minimal scene delegate that stores values for the harness sync task.
+class HdMitsubaTestTaskDelegate final : public HdSceneDelegate {
+ public:
+  HdMitsubaTestTaskDelegate(HdRenderIndex* parent_index, const SdfPath& id)
+      : HdSceneDelegate(parent_index, id) {}
+
+  void SetValue(const TfToken& key, VtValue value) {
+    values_[key] = std::move(value);
+  }
+
+  VtValue Get(const SdfPath& /*id*/, const TfToken& key) override {
+    auto it = values_.find(key);
+    return it == values_.end() ? VtValue() : it->second;
+  }
+
+ private:
+  std::map<TfToken, VtValue, TfTokenFastArbitraryLessThan> values_;
+};
+
+// Task that enqueues the harness collection for sync and declares the
+// geometry render tag; this mirrors the role HdxRenderTask plays in
+// applications (rprims are only synced for render tags declared by tasks).
+class HdMitsubaTestSyncTask final : public HdTask {
+ public:
+  HdMitsubaTestSyncTask(HdSceneDelegate* /*delegate*/, const SdfPath& id)
+      : HdTask(id) {}
+
+  void Sync(HdSceneDelegate* delegate, HdTaskContext* /*ctx*/,
+            HdDirtyBits* dirty_bits) override {
+    VtValue collection = delegate->Get(GetId(), HdTokens->collection);
+    if (collection.IsHolding<HdRprimCollection>()) {
+      delegate->GetRenderIndex().EnqueueCollectionToSync(
+          collection.UncheckedGet<HdRprimCollection>());
+    }
+    *dirty_bits = HdChangeTracker::Clean;
+  }
+  void Prepare(HdTaskContext* /*ctx*/, HdRenderIndex* /*index*/) override {}
+  void Execute(HdTaskContext* /*ctx*/) override {}
+
+  const TfTokenVector& GetRenderTags() const override {
+    static const TfTokenVector* kRenderTags =
+        new TfTokenVector{HdRenderTagTokens->geometry};
+    return *kRenderTags;
+  }
+};
+
+// Hydra 2.0 test harness: the stage is imaged through the
+// UsdImagingStageSceneIndex chain (UsdImagingCreateSceneIndices), inserted
+// into the render index exactly like applications such as usdview do in scene
+// index mode. Prims are created and synced by the render index's scene index
+// emulation, and the resulting Mitsuba scene state can be inspected through
+// the returned SceneManager.
+struct SceneIndexTestHarness {
+  // Destruction order (reverse of declaration): the scene index chain goes
+  // away before the render index, which goes away before the render delegate.
+  std::unique_ptr<HdMitsubaRenderDelegate> render_delegate;
+  std::unique_ptr<HdRenderIndex> render_index;
+  std::unique_ptr<HdMitsubaTestTaskDelegate> task_delegate;
+  UsdImagingSceneIndices scene_indices;
+  SdfPath task_id;
+  SceneManager* scene_manager = nullptr;
+  HdMitsubaRenderParam* render_param = nullptr;
+
+  // Propagates pending USD edits through the scene index chain and syncs all
+  // dirty prims in the render index (the equivalent of one Hydra sync round).
+  void Sync() {
+    scene_indices.stageSceneIndex->ApplyPendingUpdates();
+    // Re-sync the task each round so that it re-enqueues the collection.
+    render_index->GetChangeTracker().MarkTaskDirty(
+        task_id, HdChangeTracker::DirtyCollection);
+    HdTaskSharedPtrVector tasks = {render_index->GetTask(task_id)};
+    HdTaskContext task_context;
+    render_index->SyncAll(&tasks, &task_context);
+  }
+};
+
+inline SceneIndexTestHarness CreateSceneIndexTestHarness(
+    const UsdStageRefPtr& stage) {
+  SceneIndexTestHarness harness;
+  harness.render_delegate = std::make_unique<HdMitsubaRenderDelegate>();
+  harness.render_index = std::unique_ptr<HdRenderIndex>(
+      pxr::HdRenderIndex::New(harness.render_delegate.get(), {}));
+
+  UsdImagingCreateSceneIndicesInfo create_info;
+  create_info.stage = stage;
+  harness.scene_indices = UsdImagingCreateSceneIndices(create_info);
+  harness.scene_indices.stageSceneIndex->SetTime(UsdTimeCode::Default());
+  harness.render_index->InsertSceneIndex(
+      harness.scene_indices.finalSceneIndex, SdfPath::AbsoluteRootPath());
+
+  HdRprimCollection collection(HdTokens->geometry,
+                               HdReprSelector(HdReprTokens->hull));
+  collection.SetRootPath(SdfPath::AbsoluteRootPath());
+
+  harness.task_delegate = std::make_unique<HdMitsubaTestTaskDelegate>(
+      harness.render_index.get(), SdfPath("/hdMitsubaTestTask"));
+  harness.task_id = SdfPath("/hdMitsubaTestTask/sync_task");
+  harness.task_delegate->SetValue(HdTokens->collection, VtValue(collection));
+  harness.render_index->InsertTask<HdMitsubaTestSyncTask>(
+      harness.task_delegate.get(), harness.task_id);
+
+  harness.render_param = static_cast<HdMitsubaRenderParam*>(
+      harness.render_delegate->GetRenderParam());
+  harness.scene_manager = harness.render_param->GetScene();
+
+  harness.Sync();
+  return harness;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE
