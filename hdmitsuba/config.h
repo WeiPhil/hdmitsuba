@@ -31,6 +31,10 @@ class HdMitsubaConfig {
   /// Global override for kernel freezing: -1 = use USD settings, 0 = force off, 1 = force on
   int use_kernel_freezing = -1;
 
+  /// Disable native (observer-based) scene index consumption and fall back
+  /// to the emulated prim-sync path (values > 0 disable).
+  int disable_native_scene_index = 0;
+
  private:
   HdMitsubaConfig();
   ~HdMitsubaConfig() = default;

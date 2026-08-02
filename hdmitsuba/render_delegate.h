@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "hdmitsuba/scene_index_backend.h"
 #include <memory>
 
 #include <pxr/base/tf/staticTokens.h>
@@ -81,6 +82,18 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
 
   HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override;
 
+  // Hydra 2.0 native protocol: the render index hands over its terminal
+  // scene index at construction and calls Update() at the start of every
+  // SyncAll; the scene index backend consumes notifications there.
+  void SetTerminalSceneIndex(
+      const HdSceneIndexBaseRefPtr& terminalSceneIndex) override;
+  void Update() override;
+
+  // Whether the native backend owns this prim (its prim Sync must no-op).
+  bool NativeClaimed(const SdfPath& id) const {
+    return scene_index_backend_.Claimed(id);
+  }
+
  private:
   void Initialize();
 
@@ -88,6 +101,7 @@ class HdMitsubaRenderDelegate final : public HdRenderDelegate {
   HdMitsubaRenderDelegate(const HdMitsubaRenderDelegate&) = delete;
   HdMitsubaRenderDelegate& operator=(const HdMitsubaRenderDelegate&) = delete;
 
+  HdMitsubaSceneIndexBackend scene_index_backend_;
   std::unique_ptr<SceneManager> scene_impl_;
   std::unique_ptr<HdMitsubaRenderParam> render_param_;
   HdRenderIndex* render_index_ = nullptr;

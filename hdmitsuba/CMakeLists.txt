@@ -33,6 +33,7 @@ add_library(hdMitsuba SHARED
   render_pass.cc
   render_settings.cc
   renderer_plugin.cc
+  scene_index_backend.cc
   scene_index_plugin.cc
   scene_manager.cc
   traversal.cc

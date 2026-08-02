@@ -252,3 +252,36 @@ tests skip there. Two additions close the gap:
   embree, so it runs on developer machines, not in the sandboxed test
   container; the skipped tests activate automatically once the plugin
   registers.
+
+## Native scene index consumption (dual-mode backend)
+
+Hydra 2.0's render-delegate protocol (`HdRenderDelegate::SetTerminalSceneIndex`
+called at render index construction, `HdRenderDelegate::Update()` called at
+the start of every `SyncAll`) lets a delegate observe the terminal scene
+index directly. `scene_index_backend.{h,cc}` implements this:
+an `HdSceneIndexObserver` queues added/dirtied/removed notifications and
+`Update()` translates them straight into hdMitsuba specs — no dirty-bit
+mapping, no per-prim `Sync` machinery.
+
+The backend claims prim types whose translation is stateless enough to run
+outside prim objects — materials, all light types, cameras — using the
+shared translation functions in `prim_translation.h` (extracted from the
+prim `Sync` bodies; camera translation reads `HdCameraSchema`/`HdXformSchema`
+natively). Claimed prims' Hydra `Sync` methods are no-ops; unclaimed types
+(meshes, curves, instancers) and hosts on Hydra versions without the 2.0
+protocol continue through the prim path unchanged — dual-mode from a single
+mechanism, verified active in the render_engine and the usdview stack
+(including the application's injected free camera).
+`HDMITSUBA_DISABLE_NATIVE_SCENE_INDEX=1` forces the emulated path (used for
+A/B benchmarks); `TF_DEBUG=HDMITSUBA_NATIVE` traces claims and translations.
+
+Found by the suites while bringing this up: a pending `needs_rebuild` spec
+could be downgraded by a later value-only sync in the same frame (the
+native add + dirty double-translate hits this reliably; the emulated path
+could in principle too). The scene manager's `Sync*` methods now keep
+pending rebuilds sticky until a commit consumes them.
+
+Remaining prim-path surface after this change: mesh/curves/instancer
+translation (per-prim subdivision state and instancing composition), and
+the rprim layer that render passes and collections require. Migrating
+meshes is the natural next step.

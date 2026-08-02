@@ -14,6 +14,9 @@
 
 #include "hdmitsuba/material.h"
 
+#include "hdmitsuba/prim_translation.h"
+#include "hdmitsuba/render_delegate.h"
+
 #include <utility>
 
 #include <pxr/base/vt/value.h>
@@ -232,6 +235,13 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   const SdfPath& id = GetId();
   TF_DEBUG(HDMITSUBA_SYNC).Msg("HdMitsubaMaterial::Sync: %s\n", id.GetText());
 
+  if (static_cast<HdMitsubaRenderDelegate*>(
+          scene_delegate->GetRenderIndex().GetRenderDelegate())
+          ->NativeClaimed(id)) {
+    *dirty_bits = HdChangeTracker::Clean;
+    return;
+  }
+
   if (!(*dirty_bits & DirtyBits::DirtyParams) &&
       !(*dirty_bits & DirtyBits::DirtyResource)) {
     *dirty_bits = HdChangeTracker::Clean;
@@ -245,19 +255,25 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   }
   SceneManager* scene_manager =
       static_cast<HdMitsubaRenderParam*>(render_param)->GetScene();
+  TranslateMaterialPrim(scene_index, id, &translation_state_, scene_manager);
+  *dirty_bits = HdChangeTracker::Clean;
+}
 
+
+void TranslateMaterialPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                           const SdfPath& id, MaterialTranslationState* state,
+                           SceneManager* scene_manager) {
   // Syncs an empty network, which rebuilds the material as the fallback BSDF.
   // This matters when a previously valid network becomes empty (e.g. its
   // surface output is disconnected interactively): the stale Mitsuba material
   // must be replaced rather than kept.
   auto sync_empty_network = [&]() {
-    has_last_network_ = false;
-    last_network_ = HdMaterialNetwork2();
+    state->has_last_network = false;
+    state->last_network = HdMaterialNetwork2();
     MaterialSpec spec;
     spec.id = id;
     spec.needs_rebuild = true;
     scene_manager->SyncMaterial(std::move(spec));
-    *dirty_bits = HdChangeTracker::Clean;
   };
 
   HdMaterialSchema materialSchema =
@@ -305,9 +321,9 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
   spec.id = id;
   // Edits that only change (non-structural) parameter values update the
   // existing Mitsuba BSDF in place; everything else rebuilds it.
-  const bool update_in_place = has_last_network_ && IsSurfaceOnly(network) &&
-                               IsSurfaceOnly(last_network_) &&
-                               OnlyParameterValuesChanged(last_network_,
+  const bool update_in_place = state->has_last_network && IsSurfaceOnly(network) &&
+                               IsSurfaceOnly(state->last_network) &&
+                               OnlyParameterValuesChanged(state->last_network,
                                                           network);
   if (update_in_place) {
     TF_DEBUG(HDMITSUBA_SYNC)
@@ -315,15 +331,14 @@ void HdMitsubaMaterial::Sync(HdSceneDelegate* scene_delegate,
              "updating the Mitsuba BSDF in place\n",
              id.GetText());
     spec.needs_rebuild = false;
-    spec.dirty_bits = DirtyBits::DirtyParams;
+    spec.dirty_bits = HdMaterial::DirtyParams;
   } else {
     spec.needs_rebuild = true;
   }
-  last_network_ = network;
-  has_last_network_ = true;
+  state->last_network = network;
+  state->has_last_network = true;
   spec.network2 = std::move(network);
   scene_manager->SyncMaterial(std::move(spec));
-  *dirty_bits = HdChangeTracker::Clean;
 }
 
 HdDirtyBits HdMitsubaMaterial::GetInitialDirtyBitsMask() const {

@@ -174,6 +174,15 @@ HdBprim* HdMitsubaRenderDelegate::CreateBprim(const TfToken& typeId,
 
 void HdMitsubaRenderDelegate::DestroyBprim(HdBprim* bPrim) { delete bPrim; }
 
+void HdMitsubaRenderDelegate::SetTerminalSceneIndex(
+    const HdSceneIndexBaseRefPtr& terminalSceneIndex) {
+  scene_index_backend_.Attach(terminalSceneIndex);
+}
+
+void HdMitsubaRenderDelegate::Update() {
+  scene_index_backend_.ProcessUpdates(scene_impl_.get());
+}
+
 HdRenderPassSharedPtr HdMitsubaRenderDelegate::CreateRenderPass(
     HdRenderIndex* index, const HdRprimCollection& collection) {
   render_index_ = index;

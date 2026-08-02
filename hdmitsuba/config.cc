@@ -32,10 +32,16 @@ TF_DEFINE_ENV_SETTING(
 TF_DEFINE_ENV_SETTING(
     HDMITSUBA_USE_KERNEL_FREEZING, -1,
     "Force kernel freezing on (1) or off (0), or use USD settings (-1)");
+TF_DEFINE_ENV_SETTING(
+    HDMITSUBA_DISABLE_NATIVE_SCENE_INDEX, 0,
+    "Disable the native (observer-based) scene index backend and use the "
+    "emulated prim-sync path instead (values > 0 disable)");
 
 HdMitsubaConfig::HdMitsubaConfig() {
   variant = TfGetEnvSetting(HDMITSUBA_VARIANT);
   use_kernel_freezing = TfGetEnvSetting(HDMITSUBA_USE_KERNEL_FREEZING);
+  disable_native_scene_index =
+      TfGetEnvSetting(HDMITSUBA_DISABLE_NATIVE_SCENE_INDEX);
   if (TfGetEnvSetting(HDMITSUBA_PRINT_CONFIGURATION) > 0) {
     TF_STATUS("HdMitsuba Configuration:\n  variant             = %s\n  use_kernel_freezing = %d",
               variant.c_str(), use_kernel_freezing);
