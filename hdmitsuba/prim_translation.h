@@ -54,6 +54,13 @@ struct CameraTranslationState {
   std::string film_pixel_filter_type;
 };
 
+struct MeshTranslationState {
+  bool is_subdivided = false;
+};
+
+struct CurvesTranslationState {
+};
+
 // Whether replacing `prev` with `next` on a live material can change
 // construction-time specialization (feature gates baked from 0/1/all-zero
 // values, type or string changes) — such changes require a rebuild rather
@@ -79,6 +86,18 @@ void TranslateLightPrim(const HdSceneIndexBaseRefPtr& scene_index,
 void TranslateCameraPrim(const HdSceneIndexBaseRefPtr& scene_index,
                          const SdfPath& id, HdDirtyBits dirty_bits,
                          CameraTranslationState* state,
+                         SceneManager* scene_manager);
+
+// Translates the mesh prim at `id` from mesh/primvars/materialBindings schemas.
+void TranslateMeshPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                       const SdfPath& id, HdDirtyBits dirty_bits,
+                       MeshTranslationState* state,
+                       SceneManager* scene_manager);
+
+// Translates the basis curves prim at `id` from basisCurves/primvars schemas.
+void TranslateCurvesPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                         const SdfPath& id, HdDirtyBits dirty_bits,
+                         CurvesTranslationState* state,
                          SceneManager* scene_manager);
 
 PXR_NAMESPACE_CLOSE_SCOPE

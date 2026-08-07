@@ -37,6 +37,8 @@
 #include <pxr/pxr.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "hdmitsuba/prim_translation.h"
+#include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
@@ -89,6 +91,12 @@ HdDirtyBits HdMitsubaCurves::GetInitialDirtyBitsMask() const {
 void HdMitsubaCurves::Sync(HdSceneDelegate* sceneDelegate,
                            HdRenderParam* renderParam, HdDirtyBits* dirtyBits,
                            const TfToken& /*reprToken*/) {
+  auto* mitsuba_delegate = dynamic_cast<HdMitsubaRenderDelegate*>(
+      sceneDelegate->GetRenderIndex().GetRenderDelegate());
+  if (mitsuba_delegate && mitsuba_delegate->NativeClaimed(GetId())) {
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
+  }
   static const HdDataSourceLocator points_locator(
       HdPrimvarsSchema::GetSchemaToken(), HdTokens->points,
       HdPrimvarSchemaTokens->primvarValue);
@@ -238,5 +246,110 @@ HdDirtyBits HdMitsubaCurves::_PropagateDirtyBits(HdDirtyBits bits) const {
 
 void HdMitsubaCurves::_InitRepr(const TfToken& /*reprToken*/,
                                 HdDirtyBits* /*dirtyBits*/) {}
+
+void TranslateCurvesPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                         const SdfPath& id, HdDirtyBits dirty_bits,
+                         CurvesTranslationState* /*state*/,
+                         SceneManager* scene_manager) {
+  HdSceneIndexPrim prim = scene_index->GetPrim(id);
+  if (!prim.dataSource) {
+    return;
+  }
+
+  // 1. Visibility
+  static const HdDataSourceLocator visibility_locator(
+      HdVisibilitySchema::GetSchemaToken(),
+      HdVisibilitySchemaTokens->visibility);
+  const bool visible = GetParam<bool>(prim.dataSource, visibility_locator, true);
+  if (!visible) {
+    scene_manager->RemoveShape(id);
+    return;
+  }
+
+  CurveSpec spec;
+  spec.id = id;
+  GfMatrix4d m = GetWorldTransform(*scene_index, id);
+  spec.transform = UsdToMitsubaTransform(m);
+  spec.material_id = GetBoundMaterial(*scene_index, id);
+  spec.dirty_bits = dirty_bits;
+
+  // Primvars
+  PrimvarMap pvars;
+  ExtractPrimvars(prim.dataSource, pvars);
+  VtVec3fArray points;
+  auto points_it = pvars.find(HdTokens->points);
+  if (points_it != pvars.end() &&
+      points_it->second.value.IsHolding<VtVec3fArray>()) {
+    points = points_it->second.value.Get<VtVec3fArray>();
+  }
+
+  VtFloatArray widths;
+  auto widths_it = pvars.find(HdTokens->widths);
+  if (widths_it != pvars.end() &&
+      widths_it->second.value.IsHolding<VtFloatArray>()) {
+    widths = widths_it->second.value.Get<VtFloatArray>();
+  }
+
+  if (widths.size() == points.size()) {
+    spec.control_points =
+        PackControlPoints(points, [&](size_t i) { return widths[i]; });
+  } else {
+    float radius = CalculateMeanWidth(widths);
+    spec.control_points =
+        PackControlPoints(points, [&](size_t /*i*/) { return radius; });
+  }
+
+  // Basis / Topology
+  static const HdDataSourceLocator basis_locator(
+      TfToken("basisCurves"), TfToken("topology"),
+      HdBasisCurvesTopologySchemaTokens->basis);
+  static const HdDataSourceLocator type_locator(
+      TfToken("basisCurves"), TfToken("topology"),
+      HdBasisCurvesTopologySchemaTokens->type);
+  static const HdDataSourceLocator vertex_counts_locator(
+      TfToken("basisCurves"), TfToken("topology"),
+      HdBasisCurvesTopologySchemaTokens->curveVertexCounts);
+
+  TfToken curve_type =
+      GetParam<TfToken>(prim.dataSource, type_locator, HdTokens->cubic);
+  TfToken curve_basis =
+      GetParam<TfToken>(prim.dataSource, basis_locator, HdTokens->bezier);
+  VtIntArray curve_vertex_counts = GetParam<VtIntArray>(
+      prim.dataSource, vertex_counts_locator, VtIntArray());
+
+  if (curve_type == HdTokens->linear) {
+    spec.plugin_name = "linearcurve";
+  } else if (curve_type == HdTokens->cubic) {
+    if (curve_basis == HdTokens->bezier) {
+      spec.plugin_name = "beziercurve";
+    } else if (curve_basis == HdTokens->bspline) {
+      spec.plugin_name = "bsplinecurve";
+    } else {
+      TF_WARN("Unsupported curve basis %s for %s, falling back to linearcurve",
+              curve_basis.GetText(), id.GetText());
+      spec.plugin_name = "linearcurve";
+    }
+  } else {
+    spec.plugin_name = "linearcurve";
+  }
+
+  uint32_t total_segments = 0;
+  for (int count : curve_vertex_counts) {
+    total_segments += std::max(0, count - 1);
+  }
+  spec.segment_indices.resize(total_segments);
+  uint32_t accumulated_vertices = 0;
+  uint32_t segment_index = 0;
+  for (int count : curve_vertex_counts) {
+    int segment_count = std::max(0, count - 1);
+    for (int j = 0; j < segment_count; ++j) {
+      uint32_t index = segment_index++;
+      spec.segment_indices[index] = accumulated_vertices + j;
+    }
+    accumulated_vertices += count;
+  }
+
+  scene_manager->SyncCurves(std::move(spec));
+}
 
 PXR_NAMESPACE_CLOSE_SCOPE

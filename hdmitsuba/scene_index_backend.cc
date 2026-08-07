@@ -131,6 +131,12 @@ void HdMitsubaSceneIndexBackend::TranslatePrim(const SdfPath& id,
   } else if (prim_type == HdPrimTypeTokens->camera) {
     TranslateCameraPrim(terminal_scene_index_, id, HdCamera::AllDirty,
                         &camera_states_[id], scene_manager);
+  } else if (prim_type == HdPrimTypeTokens->mesh) {
+    TranslateMeshPrim(terminal_scene_index_, id, HdChangeTracker::AllDirty,
+                      &mesh_states_[id], scene_manager);
+  } else if (prim_type == HdPrimTypeTokens->basisCurves) {
+    TranslateCurvesPrim(terminal_scene_index_, id, HdChangeTracker::AllDirty,
+                        &curves_states_[id], scene_manager);
   } else {
     TranslateLightPrim(terminal_scene_index_, id, prim_type, HdLight::AllDirty,
                        &light_states_[id], scene_manager);
@@ -428,6 +434,11 @@ void HdMitsubaSceneIndexBackend::ProcessUpdates(SceneManager* scene_manager) {
       material_states_.erase(id);
     } else if (prim_type == HdPrimTypeTokens->camera) {
       camera_states_.erase(id);
+    } else if (prim_type == HdPrimTypeTokens->mesh ||
+               prim_type == HdPrimTypeTokens->basisCurves) {
+      scene_manager->RemoveShape(id);
+      mesh_states_.erase(id);
+      curves_states_.erase(id);
     } else {
       scene_manager->RemoveLight(id);
       light_states_.erase(id);
@@ -436,18 +447,32 @@ void HdMitsubaSceneIndexBackend::ProcessUpdates(SceneManager* scene_manager) {
         .Msg("Native remove: %s (%s)\n", id.GetText(), prim_type.GetText());
   }
 
+  // 1. Process materials first so bound materials are registered before meshes
   for (const auto& [id, prim_type] : added) {
-    if (!IsNativeType(prim_type)) {
-      continue;
+    if (prim_type == HdPrimTypeTokens->material) {
+      prim_types_[id] = prim_type;
+      {
+        absl::MutexLock lock(&claimed_mutex_);
+        claimed_.insert(id);
+      }
+      TF_DEBUG(HDMITSUBA_NATIVE)
+          .Msg("Native add: %s (%s)\n", id.GetText(), prim_type.GetText());
+      TranslatePrim(id, prim_type, scene_manager);
     }
-    prim_types_[id] = prim_type;
-    {
-      absl::MutexLock lock(&claimed_mutex_);
-      claimed_.insert(id);
+  }
+
+  // 2. Process other prims
+  for (const auto& [id, prim_type] : added) {
+    if (prim_type != HdPrimTypeTokens->material && IsNativeType(prim_type)) {
+      prim_types_[id] = prim_type;
+      {
+        absl::MutexLock lock(&claimed_mutex_);
+        claimed_.insert(id);
+      }
+      TF_DEBUG(HDMITSUBA_NATIVE)
+          .Msg("Native add: %s (%s)\n", id.GetText(), prim_type.GetText());
+      TranslatePrim(id, prim_type, scene_manager);
     }
-    TF_DEBUG(HDMITSUBA_NATIVE)
-        .Msg("Native add: %s (%s)\n", id.GetText(), prim_type.GetText());
-    TranslatePrim(id, prim_type, scene_manager);
   }
 
   // A single edit fans out into several dirtied entries per prim (one per
@@ -474,13 +499,14 @@ void HdMitsubaSceneIndexBackend::ProcessUpdates(SceneManager* scene_manager) {
   translate_watch.Start();
   size_t translated_count = 0;
   size_t fast_count = 0;
+
+  // 1. Process dirty materials first
   for (const auto& [id, locators] : dirty_locators) {
     auto type_it = prim_types_.find(id);
-    if (type_it == prim_types_.end()) {
+    if (type_it == prim_types_.end() || type_it->second != HdPrimTypeTokens->material) {
       continue;
     }
-    if (type_it->second == HdPrimTypeTokens->material &&
-        TryFastMaterialUpdate(id, locators, scene_manager)) {
+    if (TryFastMaterialUpdate(id, locators, scene_manager)) {
       ++fast_count;
       continue;
     }
@@ -490,6 +516,20 @@ void HdMitsubaSceneIndexBackend::ProcessUpdates(SceneManager* scene_manager) {
     TranslatePrim(id, type_it->second, scene_manager);
     ++translated_count;
   }
+
+  // 2. Process other dirty prims
+  for (const auto& [id, locators] : dirty_locators) {
+    auto type_it = prim_types_.find(id);
+    if (type_it == prim_types_.end() || type_it->second == HdPrimTypeTokens->material) {
+      continue;
+    }
+    TF_DEBUG(HDMITSUBA_NATIVE)
+        .Msg("Native dirty: %s (%s)\n", id.GetText(),
+             type_it->second.GetText());
+    TranslatePrim(id, type_it->second, scene_manager);
+    ++translated_count;
+  }
+
   translate_watch.Stop();
   if (translated_count + fast_count > 0) {
     TF_DEBUG(HDMITSUBA_NATIVE)

@@ -165,6 +165,7 @@ if(HDMITSUBA_BUILD_TESTS)
   add_hdmitsuba_test(mesh_test tests/mesh_test.cc)
   add_hdmitsuba_test(geometry_processor_test mesh/tests/geometry_processor_test.cc)
   add_hdmitsuba_test(subdivision_test mesh/tests/subdivision_test.cc)
+  add_hdmitsuba_test(scene_index_test tests/scene_index_test.cc)
 endif()
 
 # --- Installation Rules ---

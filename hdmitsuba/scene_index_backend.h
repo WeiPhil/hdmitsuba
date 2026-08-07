@@ -112,6 +112,10 @@ class HdMitsubaSceneIndexBackend {
       light_states_;
   absl::flat_hash_map<SdfPath, CameraTranslationState, SdfPath::Hash>
       camera_states_;
+  absl::flat_hash_map<SdfPath, MeshTranslationState, SdfPath::Hash>
+      mesh_states_;
+  absl::flat_hash_map<SdfPath, CurvesTranslationState, SdfPath::Hash>
+      curves_states_;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

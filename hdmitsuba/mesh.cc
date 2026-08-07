@@ -57,15 +57,19 @@
 #include <pxr/imaging/hd/xformSchema.h>
 #include <pxr/imaging/pxOsd/subdivTags.h>
 #include <pxr/imaging/pxOsd/tokens.h>
+#include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/pxr.h>
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/instancer.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
+#include "hdmitsuba/prim_translation.h"
+#include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
+#include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -500,6 +504,12 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   if (*dirtyBits == HdChangeTracker::Clean) {
     return;
   }
+  auto* mitsuba_delegate = dynamic_cast<HdMitsubaRenderDelegate*>(
+      sceneDelegate->GetRenderIndex().GetRenderDelegate());
+  if (mitsuba_delegate && mitsuba_delegate->NativeClaimed(GetId())) {
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
+  }
   _UpdateInstancer(sceneDelegate, dirtyBits);
   HdInstancer::_SyncInstancerAndParents(sceneDelegate->GetRenderIndex(),
                                         GetInstancerId());
@@ -846,6 +856,95 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
     }
   }
   return primvars_;
+}
+
+void TranslateMeshPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                       const SdfPath& id, HdDirtyBits dirty_bits,
+                       MeshTranslationState* /*state*/,
+                       SceneManager* scene_manager) {
+  HdSceneIndexPrim prim = scene_index->GetPrim(id);
+  if (!prim.dataSource) {
+    return;
+  }
+
+  // 1. Visibility
+  static const HdDataSourceLocator visibility_locator(
+      HdVisibilitySchema::GetSchemaToken(),
+      HdVisibilitySchemaTokens->visibility);
+  const bool visible = GetParam<bool>(prim.dataSource, visibility_locator, true);
+  if (!visible) {
+    scene_manager->RemoveShape(id);
+    return;
+  }
+
+  MeshSpec spec;
+  spec.id = id;
+  spec.transform = GetWorldTransform(*scene_index, id);
+  spec.dirty_bits = dirty_bits;
+
+  HdMeshSchema mesh_schema = HdMeshSchema::GetFromParent(prim.dataSource);
+  if (mesh_schema.IsDefined()) {
+    HdMeshTopologySchema top_schema = mesh_schema.GetTopology();
+    if (top_schema.IsDefined()) {
+      if (HdIntArrayDataSourceHandle counts_ds =
+              top_schema.GetFaceVertexCounts()) {
+        spec.face_vertex_counts = counts_ds->GetTypedValue(0.0f);
+      }
+      if (HdIntArrayDataSourceHandle indices_ds =
+              top_schema.GetFaceVertexIndices()) {
+        spec.face_vertex_indices = indices_ds->GetTypedValue(0.0f);
+      }
+    }
+    if (HdTokenDataSourceHandle scheme_ds =
+            mesh_schema.GetSubdivisionScheme()) {
+      TfToken scheme = scheme_ds->GetTypedValue(0.0f);
+      spec.is_subdivided =
+          (scheme == PxOsdOpenSubdivTokens->catmullClark ||
+           scheme == PxOsdOpenSubdivTokens->loop);
+    }
+  }
+
+  SdfPath mat_path = GetBoundMaterial(*scene_index, id);
+  if (!mat_path.IsEmpty()) {
+    spec.material_ids.push_back(mat_path);
+  }
+
+  ExtractPrimvars(prim.dataSource, spec.primvars);
+
+  HdLightSchema light_schema = HdLightSchema::GetFromParent(prim.dataSource);
+  if (light_schema.IsDefined()) {
+    LightSpec emitter_spec;
+    emitter_spec.id = id;
+    emitter_spec.prim_type = prim.primType;
+    emitter_spec.transform = UsdToMitsubaTransform(spec.transform);
+
+    GfVec3f color(1.0f, 1.0f, 1.0f);
+    float intensity = 1.0f;
+    float exposure = 0.0f;
+
+    auto color_it = spec.primvars.find(TfToken("inputs:color"));
+    if (color_it != spec.primvars.end() && color_it->second.value.IsHolding<GfVec3f>()) {
+      color = color_it->second.value.Get<GfVec3f>();
+    }
+    auto intensity_it = spec.primvars.find(TfToken("inputs:intensity"));
+    if (intensity_it != spec.primvars.end() &&
+        intensity_it->second.value.IsHolding<float>()) {
+      intensity = intensity_it->second.value.Get<float>();
+    }
+    auto exposure_it = spec.primvars.find(TfToken("inputs:exposure"));
+    if (exposure_it != spec.primvars.end() &&
+        exposure_it->second.value.IsHolding<float>()) {
+      exposure = exposure_it->second.value.Get<float>();
+    }
+
+    float total_intensity = intensity * std::pow(2.0f, exposure);
+    emitter_spec.emission = GfVec3f(color[0] * total_intensity,
+                                    color[1] * total_intensity,
+                                    color[2] * total_intensity);
+    spec.emitter_spec = emitter_spec;
+  }
+
+  scene_manager->SyncMesh(std::move(spec));
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

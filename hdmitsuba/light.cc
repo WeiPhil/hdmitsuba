@@ -150,8 +150,7 @@ void TranslateLightPrim(const HdSceneIndexBaseRefPtr& scene_index,
   }
 
   // 2. Transform
-  const GfMatrix4d transform =
-      GetParam<GfMatrix4d>(data_source, transform_locator, GfMatrix4d(1.0));
+  const GfMatrix4d transform = GetWorldTransform(*scene_index, id);
 
   // 3. Light Parameters
   HdLightSchema light_schema = HdLightSchema::GetFromParent(data_source);

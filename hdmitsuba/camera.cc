@@ -46,25 +46,6 @@ namespace dr = drjit;
 
 namespace {
 
-ScalarAffineTransform4f RemoveScaleFromTransform(
-    const ScalarAffineTransform4f& transform) {
-  auto [s, q, t] = dr::transform_decompose(transform.matrix);
-  return ScalarAffineTransform4f(dr::transform_compose<dr::Matrix<float, 4>>(
-      dr::Matrix<float, 3>(1.0f), q, t));
-}
-
-ScalarAffineTransform4f UsdToMitsubaSensorTransform(
-    const GfMatrix4d& transform) {
-  ScalarAffineTransform4f to_world = UsdToMitsubaTransform(transform);
-  if (to_world.has_scale()) {
-    to_world = RemoveScaleFromTransform(to_world);
-  }
-  using ScalarVector3f = mitsuba::Vector<float, 3>;
-  to_world =
-      to_world * ScalarAffineTransform4f::rotate(ScalarVector3f(0, 1, 0), 180);
-  return to_world;
-}
-
 // Reads a custom (namespaced) camera parameter.
 //
 // Custom `mitsuba:*` camera attributes are overlaid into the prim's `camera`
@@ -176,13 +157,7 @@ void TranslateCameraPrim(const HdSceneIndexBaseRefPtr& scene_index,
   HdContainerDataSourceHandle camera_source = HdContainerDataSource::Cast(
       prim_source->Get(HdCameraSchema::GetSchemaToken()));
 
-  GfMatrix4d transform(1.0);
-  HdXformSchema xform = HdXformSchema::GetFromParent(prim_source);
-  if (xform.IsDefined()) {
-    if (HdMatrixDataSourceHandle matrix = xform.GetMatrix()) {
-      transform = matrix->GetTypedValue(0.0f);
-    }
-  }
+  GfMatrix4d transform = GetWorldTransform(*scene_index, id);
 
   const float focal_length =
       GetCameraField<float>(camera_source, HdCameraSchemaTokens->focalLength,
