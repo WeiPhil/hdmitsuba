@@ -109,22 +109,20 @@ inline GfMatrix4d GetWorldTransform(const HdSceneIndexBase& scene_index,
   if (prim_path.IsEmpty()) {
     return GfMatrix4d(1.0);
   }
-  GfMatrix4d world_matrix(1.0);
-  SdfPathVector prefixes;
-  prim_path.GetPrefixes(&prefixes);
-  for (const SdfPath& prefix : prefixes) {
-    HdSceneIndexPrim prim = scene_index.GetPrim(prefix);
+  SdfPath curr = prim_path;
+  while (!curr.IsEmpty() && curr != SdfPath::AbsoluteRootPath()) {
+    HdSceneIndexPrim prim = scene_index.GetPrim(curr);
     if (prim.dataSource) {
       HdXformSchema xform = HdXformSchema::GetFromParent(prim.dataSource);
       if (xform.IsDefined()) {
         if (HdMatrixDataSourceHandle matrix = xform.GetMatrix()) {
-          GfMatrix4d local_m = matrix->GetTypedValue(0.0f);
-          world_matrix = local_m * world_matrix;
+          return matrix->GetTypedValue(0.0f);
         }
       }
     }
+    curr = curr.GetParentPath();
   }
-  return world_matrix;
+  return GfMatrix4d(1.0);
 }
 
 inline SdfPath GetBoundMaterial(const HdSceneIndexBase& scene_index,

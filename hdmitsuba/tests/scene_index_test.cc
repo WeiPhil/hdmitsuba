@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <memory>
-
 #include <gtest/gtest.h>
+#include <mitsuba/core/bitmap.h>
 #include <mitsuba/core/fwd.h>
 #include <mitsuba/core/spectrum.h>
+#include <mitsuba/core/struct.h>
+#include <mitsuba/render/film.h>
+#include <mitsuba/render/integrator.h>
 #include <mitsuba/render/scene.h>
 #include <pxr/imaging/hd/retainedSceneIndex.h>
 #include <pxr/imaging/hd/sceneIndex.h>
@@ -26,6 +28,7 @@
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/xform.h>
 #include <pxr/usdImaging/usdImaging/stageSceneIndex.h>
 
 #include "hdmitsuba/scene_index_backend.h"
@@ -72,6 +75,27 @@ TEST(HdMitsubaSceneIndexTest, SceneIndexHarnessSync) {
   ASSERT_NE(scene, nullptr);
   EXPECT_GE(scene->sensors().size(), 1);
   EXPECT_EQ(scene->sensors()[0]->id(), "/World/camera");
+}
+
+TEST(HdMitsubaSceneIndexTest, HierarchicalCameraTransform) {
+  UsdStageRefPtr stage = UsdStage::CreateInMemory();
+  SdfPath xform_path("/World/xform");
+  UsdGeomXform xform = UsdGeomXform::Define(stage, xform_path);
+  GfMatrix4d parent_m;
+  parent_m.SetTranslate(GfVec3d(0, 5, 10));
+  xform.AddTransformOp().Set(parent_m);
+
+  SdfPath camera_path("/World/xform/camera");
+  UsdGeomCamera camera = UsdGeomCamera::Define(stage, camera_path);
+  camera.GetFocalLengthAttr().Set(50.0f);
+
+  SceneIndexTestHarness harness = CreateSceneIndexTestHarness(stage);
+  harness.scene_manager->CommitResources();
+
+  Scene* scene = dynamic_cast<Scene*>(harness.scene_manager->GetScene());
+  ASSERT_NE(scene, nullptr);
+  ASSERT_GE(scene->sensors().size(), 1);
+  EXPECT_EQ(scene->sensors()[0]->id(), "/World/xform/camera");
 }
 
 }  // namespace
