@@ -235,6 +235,7 @@ def test_modify_curve_transform_only():
       output_prefix='test_modify_curve_transform_only',
       atol=0.05,
       engine=engine,
+  )
   assert (
       np.max(np.abs(image_modified[..., :3] - image_original[..., :3])) > 0.2
   )
