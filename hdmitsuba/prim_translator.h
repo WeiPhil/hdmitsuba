@@ -26,6 +26,7 @@
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/render/fwd.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/pxr.h>
 
@@ -53,6 +54,43 @@ bool UseRawBitmap(const TfToken& source_color_space, const TfToken& input_name);
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const pxr::VtValue& val,
                                  bool invert_float = false);
+
+// Translates a hierarchical HdContainerDataSource into mitsuba::Properties.
+// Recursively traverses child containers and populates nested properties.
+// If variant is provided and a child container defines a plugin type, the child
+// plugin object is instantiated and attached.
+mitsuba::Properties ContainerToMitsubaProperties(
+    const HdContainerDataSourceHandle& container,
+    std::string_view default_plugin_type = "",
+    std::string_view variant = "");
+
+// Instantiates a Mitsuba plugin Object from a Properties instance.
+mitsuba::ref<mitsuba::Object> BuildPluginFromProperties(
+    const mitsuba::Properties& props,
+    std::string_view variant,
+    mitsuba::ObjectType expected_type = mitsuba::ObjectType::Unknown);
+
+// Recursively translates a hierarchical HdContainerDataSource into an instantiated Mitsuba plugin Object.
+mitsuba::ref<mitsuba::Object> BuildPluginFromContainer(
+    const HdContainerDataSourceHandle& container,
+    std::string_view variant,
+    std::string_view default_plugin_type = "",
+    mitsuba::ObjectType expected_type = mitsuba::ObjectType::Unknown);
+
+// Template convenience helper for typed objects (Integrator, BSDF, Texture, Sensor, etc.)
+template <typename T>
+mitsuba::ref<T> BuildPluginFromContainer(
+    const HdContainerDataSourceHandle& container,
+    std::string_view default_plugin_type = "") {
+  return mitsuba::ref<T>(static_cast<T*>(
+      BuildPluginFromContainer(container, T::Variant, default_plugin_type, T::Type).get()));
+}
+
+// Unflattens a container with delimited keys (e.g. "mitsuba:integrator:max_depth")
+// into a truly nested HdContainerDataSource hierarchy.
+HdContainerDataSourceHandle UnflattenContainer(
+    const HdContainerDataSourceHandle& container,
+    char delimiter = ':');
 
 std::optional<mitsuba::Properties> ExtractTextureProperties(
     const std::map<TfToken, pxr::VtValue>& parameters,

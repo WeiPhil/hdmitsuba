@@ -70,6 +70,7 @@
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/renderPass.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
@@ -1159,21 +1160,45 @@ class SceneModel final : public SceneManager {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
     {
-      auto it = namespaced_settings.find("mitsuba:integrator:type");
-      if (it != namespaced_settings.end()) {
-        std::string integrator_type = it->second.Get<std::string>();
-        if (integrator_type != integrator_type_ || !integrator_) {
-          TF_DEBUG(HDMITSUBA_LIFECYCLE)
-              .Msg("Creating integrator, type: %s (was: %s)\n",
-                   integrator_type.c_str(), integrator_type_.c_str());
-          Properties integrator_props(integrator_type);
-          integrator_ = PluginManager::instance()->create_object<Integrator>(
-              integrator_props);
-          integrator_type_ = integrator_type;
-          for (auto& [_, pass_state] : pass_aov_states_) {
-            pass_state.aov_integrator = nullptr;
+      std::vector<TfToken> ds_names;
+      std::vector<HdDataSourceBaseHandle> ds_sources;
+      for (const auto& [k, v] : namespaced_settings) {
+        ds_names.push_back(TfToken(k));
+        ds_sources.push_back(
+            HdRetainedTypedSampledDataSource<VtValue>::New(v));
+      }
+      HdContainerDataSourceHandle flat_ds =
+          HdRetainedContainerDataSource::New(
+              ds_names.size(), ds_names.data(), ds_sources.data());
+      HdContainerDataSourceHandle unflattened =
+          UnflattenContainer(flat_ds, ':');
+
+      if (unflattened) {
+        HdContainerDataSourceHandle mitsuba_ds =
+            HdContainerDataSource::Cast(unflattened->Get(TfToken("mitsuba")));
+        HdContainerDataSourceHandle integrator_ds =
+            mitsuba_ds ? HdContainerDataSource::Cast(
+                             mitsuba_ds->Get(TfToken("integrator")))
+                       : nullptr;
+
+        if (integrator_ds) {
+          Properties integrator_props = ContainerToMitsubaProperties(
+              integrator_ds, "path", Integrator::Variant);
+          std::string integrator_type =
+              std::string(integrator_props.plugin_name());
+          if (integrator_type != integrator_type_ || !integrator_) {
+            TF_DEBUG(HDMITSUBA_LIFECYCLE)
+                .Msg("Creating integrator, type: %s (was: %s)\n",
+                     integrator_type.c_str(), integrator_type_.c_str());
+            integrator_ = mitsuba::ref<Integrator>(static_cast<Integrator*>(
+                BuildPluginFromProperties(integrator_props, Integrator::Variant)
+                    .get()));
+            integrator_type_ = integrator_type;
+            for (auto& [_, pass_state] : pass_aov_states_) {
+              pass_state.aov_integrator = nullptr;
+            }
+            reset_progressive_ = true;
           }
-          reset_progressive_ = true;
         }
       }
     }
