@@ -119,8 +119,11 @@ void SyncMitsubaPythonVariant(const std::string& variant) {
   }
   if (!TfPyInvoke("mitsuba", "set_variant", variant)) {
     TF_WARN(
-        "Failed to set Mitsuba Python variant '%s'; Python-defined plugins "
-        "(e.g. volprim_rf_basic) will be unavailable.",
+        "Could not import the Mitsuba Python module or set variant '%s'. This "
+        "usually means the Mitsuba Python module was not found: check that "
+        "PYTHONPATH points at the same Mitsuba build hdMitsuba was compiled "
+        "against. Python-defined plugins (e.g. volprim_rf_basic) will be "
+        "unavailable.",
         variant.c_str());
   }
 #else
