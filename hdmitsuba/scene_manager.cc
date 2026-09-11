@@ -330,26 +330,19 @@ void PerformBatchedCopy(const TensorT& tensor,
                          dest.src_offset + channel_offsets;
 
       auto in_crop_channel = dr::repeat(in_crop, dst_channels);
+      auto valid_channel = in_crop_channel && (channel_offsets < dest.channels);
 
       if (dest.is_int) {
-        Int32 gathered_int = dr::select(
-            in_crop_channel,
-            Int32(dr::gather<Float>(tensor.array(), final_idx)),
-            0);
+        Int32 gathered_int = Int32(dr::gather<Float>(
+            tensor.array(), final_idx, valid_channel));
         dr::schedule(gathered_int);
         gathered_vars.push_back(gathered_int);
       } else {
-        Float gathered_float;
+        Float gathered_float = dr::gather<Float>(
+            tensor.array(), final_idx, valid_channel);
         if (dst_channels == 4 && dest.channels == 3) {
           gathered_float = dr::select(
-              in_crop_channel,
-              dr::select(channel_offsets < 3,
-                         dr::gather<Float>(tensor.array(), final_idx), 1.0f),
-              0.0f);
-        } else {
-          gathered_float = dr::select(
-              in_crop_channel,
-              dr::gather<Float>(tensor.array(), final_idx), 0.0f);
+              in_crop_channel && (channel_offsets == 3), 1.0f, gathered_float);
         }
         dr::schedule(gathered_float);
         gathered_vars.push_back(gathered_float);
