@@ -22,6 +22,8 @@ TF_REGISTRY_FUNCTION(TfDebug) {
   TF_DEBUG_ENVIRONMENT_SYMBOL(HDMITSUBA_LIFECYCLE,
                               "hdMitsuba object lifecycle");
   TF_DEBUG_ENVIRONMENT_SYMBOL(HDMITSUBA_SYNC, "hdMitsuba sync calls");
+  TF_DEBUG_ENVIRONMENT_SYMBOL(HDMITSUBA_NATIVE,
+                              "hdMitsuba native scene-index backend");
   TF_DEBUG_ENVIRONMENT_SYMBOL(HDMITSUBA_GEOMETRY,
                               "hdMitsuba geometry processing");
 }

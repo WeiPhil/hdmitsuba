@@ -62,6 +62,7 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
   std::vector<uint32_t> owned_class_vars;
   absl::flat_hash_set<void*> visited_ptrs;
 
+#if DRJIT_VERSION_MAJOR > 1 || (DRJIT_VERSION_MAJOR == 1 && DRJIT_VERSION_MINOR >= 6)
   auto collect_cb = [](void* payload, uint64_t index_combined, const char*,
                        const char*, const char*) -> uint64_t {
     auto* vec = static_cast<std::vector<uint32_t>*>(payload);
@@ -128,6 +129,75 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
       }
     }
   }
+#else
+  auto collect_cb = [](void* payload, uint64_t index_combined, const char*,
+                       const char*) {
+    auto* vec = static_cast<std::vector<uint32_t>*>(payload);
+    uint32_t index = (uint32_t)index_combined;
+    if (index != 0) {
+      vec->push_back(index);
+    }
+  };
+
+  bool old_traversal = ::jit_flag(::JitFlag::EnableObjectTraversal);
+  ::jit_set_flag(::JitFlag::EnableObjectTraversal, true);
+
+  if constexpr (dr::is_jit_v<Float>) {
+    ::JitBackend backend = dr::backend_v<Float>;
+    auto collect_class_var = [&](void* ptr) {
+      if (!ptr || !visited_ptrs.insert(ptr).second) return;
+      uint32_t class_var = ::jit_var_class(backend, ptr);
+      if (class_var != 0) {
+        indices.push_back(class_var);
+        owned_class_vars.push_back(class_var);
+      }
+    };
+
+    if (scene) {
+      collect_class_var(scene);
+      dr::traverse_1_fn_ro(*scene, &indices, collect_cb);
+    }
+    if (sensor) {
+      collect_class_var(sensor);
+      dr::traverse_1_fn_ro(*sensor, &indices, collect_cb);
+    }
+    if (integrator) {
+      collect_class_var(integrator);
+      dr::traverse_1_fn_ro(*integrator, &indices, collect_cb);
+    }
+
+    const char* variant_name = mitsuba::detail::variant<Float, Spectrum>::name;
+    constexpr const char* domains[] = {
+        "Scene",
+        "ReconstructionFilter",
+        "Sensor",
+        "Film",
+        "Emitter",
+        "Sampler",
+        "Shape",
+        "Texture",
+        "Volume",
+        "Medium",
+        "BSDF",
+        "PhaseFunction",
+        "Integrator"
+    };
+
+    for (const auto& domain : domains) {
+      uint32_t registry_bound = ::jit_registry_id_bound(variant_name, domain);
+      if (registry_bound == 0) continue;
+      std::vector<void*> registry_pointers(registry_bound, nullptr);
+      ::jit_registry_get_pointers(variant_name, domain, registry_pointers.data());
+      for (void* ptr : registry_pointers) {
+        if (!ptr) continue;
+        collect_class_var(ptr);
+        auto* obj = static_cast<mitsuba::Object*>(ptr);
+        dr::traverse_1_fn_ro(*obj, &indices, collect_cb);
+      }
+    }
+  }
+  ::jit_set_flag(::JitFlag::EnableObjectTraversal, old_traversal);
+#endif
 
   // Deduplicate collected indices using an order-preserving set
   std::vector<uint32_t> unique_indices;

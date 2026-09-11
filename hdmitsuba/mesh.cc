@@ -35,25 +35,41 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/enums.h>
-#include <pxr/imaging/hd/extComputationUtils.h>
 #include <pxr/imaging/hd/geomSubset.h>
+#include <pxr/imaging/hd/geomSubsetSchema.h>
+#include <pxr/imaging/hd/legacyDisplayStyleSchema.h>
 #include <pxr/imaging/hd/light.h>
+#include <pxr/imaging/hd/materialBindingSchema.h>
+#include <pxr/imaging/hd/materialBindingsSchema.h>
 #include <pxr/imaging/hd/mesh.h>
+#include <pxr/imaging/hd/meshSchema.h>
 #include <pxr/imaging/hd/meshTopology.h>
+#include <pxr/imaging/hd/meshTopologySchema.h>
+#include <pxr/imaging/hd/primvarSchema.h>
+#include <pxr/imaging/hd/primvarsSchema.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/sceneIndex.h>
+#include <pxr/imaging/hd/subdivisionTagsSchema.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
+#include <pxr/imaging/hd/visibilitySchema.h>
+#include <pxr/imaging/hd/xformSchema.h>
+#include <pxr/imaging/pxOsd/subdivTags.h>
 #include <pxr/imaging/pxOsd/tokens.h>
+#include <pxr/imaging/hd/lightSchema.h>
 #include <pxr/pxr.h>
 
 #include "hdmitsuba/debug_codes.h"
 #include "hdmitsuba/instancer.h"
 #include "hdmitsuba/mesh/geometry_processor.h"
 #include "hdmitsuba/mesh/subdivision.h"
+#include "hdmitsuba/prim_translation.h"
+#include "hdmitsuba/render_delegate.h"
 #include "hdmitsuba/render_param.h"
 #include "hdmitsuba/scene_manager.h"
 #include "hdmitsuba/spec_types.h"
+#include "hdmitsuba/utils.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -89,9 +105,345 @@ bool ValidatePrimvarSize(const VtValue& value, HdInterpolation interpolation,
   }
 }
 
+// Returns the render index's terminal scene index (the Hydra 2.0 view of the
+// scene), or null when unavailable.
+HdSceneIndexBaseRefPtr GetTerminalSceneIndex(HdSceneDelegate* sceneDelegate) {
+  return sceneDelegate->GetRenderIndex().GetTerminalSceneIndex();
+}
+
+// Returns the prim's container data source on the terminal scene index, or
+// null when unavailable.
+HdContainerDataSourceHandle GetTerminalPrimDataSource(
+    HdSceneDelegate* sceneDelegate, const SdfPath& id) {
+  if (HdSceneIndexBaseRefPtr scene_index =
+          GetTerminalSceneIndex(sceneDelegate)) {
+    return scene_index->GetPrim(id).dataSource;
+  }
+  return nullptr;
+}
+
+// Reads a custom (non-schema) attribute value for a prim.
+//
+// Hydra 2.0: when the scene is fed by the UsdImagingStageSceneIndex, custom
+// `mitsuba:*` attributes are published as top-level entries of the prim's
+// container data source by the keyless UsdImagingMitsubaAttributesAdapter
+// (see usd_imaging_mitsuba/adapter.cc), so we look them up on the render
+// index's terminal scene index first. When running behind a legacy scene
+// delegate, the data source lookup misses and we fall back to
+// HdSceneDelegate::Get(), which reads the USD attribute directly.
+VtValue GetCustomPrimValue(HdSceneDelegate* sceneDelegate, const SdfPath& id,
+                           const TfToken& key) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    if (HdSampledDataSourceHandle sampled =
+            HdSampledDataSource::Cast(data_source->Get(key))) {
+      VtValue value = sampled->GetValue(0.0f);
+      if (!value.IsEmpty()) {
+        return value;
+      }
+    }
+  }
+  return VtValue();
+}
+
+// The following readers are data-source-first (Hydra 2.0 native), with the
+// legacy scene-delegate call kept as a fallback for hosts that still drive
+// the delegate through a legacy front-end.
+
+bool GetMeshVisibility(HdSceneDelegate* sceneDelegate, const SdfPath& id) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    HdVisibilitySchema schema = HdVisibilitySchema::GetFromParent(data_source);
+    if (schema.IsDefined()) {
+      if (HdBoolDataSourceHandle visibility = schema.GetVisibility()) {
+        return visibility->GetTypedValue(0.0f);
+      }
+    }
+  }
+  // An absent visibility schema means visible.
+  return true;
+}
+
+GfMatrix4d GetMeshTransform(HdSceneDelegate* sceneDelegate, const SdfPath& id) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    HdXformSchema schema = HdXformSchema::GetFromParent(data_source);
+    if (schema.IsDefined()) {
+      if (HdMatrixDataSourceHandle matrix = schema.GetMatrix()) {
+        return matrix->GetTypedValue(0.0f);
+      }
+    }
+  }
+  // No xform published: identity.
+  return GfMatrix4d(1.0);
+}
+
+// Resolves the bound material path from a prim data source's material
+// bindings schema (used for both meshes and geom subset child prims).
+std::optional<SdfPath> GetMaterialIdFromDataSource(
+    const HdContainerDataSourceHandle& data_source) {
+  HdMaterialBindingsSchema bindings =
+      HdMaterialBindingsSchema::GetFromParent(data_source);
+  if (bindings.IsDefined()) {
+    // The all-purpose binding; application-side filters (e.g. usdview's
+    // material binding resolving scene index) resolve purpose-specific
+    // bindings into it. Fall back to our declared binding purpose.
+    HdMaterialBindingSchema binding = bindings.GetMaterialBinding();
+    if (!binding.IsDefined()) {
+      binding = bindings.GetMaterialBinding(HdTokens->full);
+    }
+    if (binding.IsDefined()) {
+      if (HdPathDataSourceHandle path = binding.GetPath()) {
+        return path->GetTypedValue(0.0f);
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+SdfPath GetMeshMaterialId(HdSceneDelegate* sceneDelegate, const SdfPath& id) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    if (std::optional<SdfPath> material_id =
+            GetMaterialIdFromDataSource(data_source)) {
+      return *material_id;
+    }
+  }
+  return SdfPath();  // No binding published: the mesh is unbound.
+}
+
+// Schema-native mesh topology: assembled from HdMeshSchema (face vertex
+// counts/indices, holes, orientation, subdivision scheme) plus geom subsets,
+// which Hydra 2.0 represents as `geomSubset` child prims of the mesh. Returns
+// nullopt when the terminal scene index has no mesh topology for the prim so
+// the caller can fall back to the scene delegate.
+std::optional<HdMeshTopology> GetMeshTopologyFromSceneIndex(
+    HdSceneDelegate* sceneDelegate, const SdfPath& id) {
+  HdSceneIndexBaseRefPtr scene_index = GetTerminalSceneIndex(sceneDelegate);
+  if (!scene_index) {
+    return std::nullopt;
+  }
+  HdContainerDataSourceHandle data_source =
+      scene_index->GetPrim(id).dataSource;
+  if (!data_source) {
+    return std::nullopt;
+  }
+  HdMeshSchema mesh = HdMeshSchema::GetFromParent(data_source);
+  HdMeshTopologySchema topology_schema = mesh.GetTopology();
+  if (!topology_schema.IsDefined()) {
+    return std::nullopt;
+  }
+
+  VtIntArray face_vertex_counts;
+  if (HdIntArrayDataSourceHandle counts =
+          topology_schema.GetFaceVertexCounts()) {
+    face_vertex_counts = counts->GetTypedValue(0.0f);
+  }
+  VtIntArray face_vertex_indices;
+  if (HdIntArrayDataSourceHandle indices =
+          topology_schema.GetFaceVertexIndices()) {
+    face_vertex_indices = indices->GetTypedValue(0.0f);
+  }
+  VtIntArray hole_indices;
+  if (HdIntArrayDataSourceHandle holes = topology_schema.GetHoleIndices()) {
+    hole_indices = holes->GetTypedValue(0.0f);
+  }
+  TfToken orientation = HdMeshTopologySchemaTokens->rightHanded;
+  if (HdTokenDataSourceHandle orientation_source =
+          topology_schema.GetOrientation()) {
+    orientation = orientation_source->GetTypedValue(0.0f);
+  }
+  TfToken scheme = PxOsdOpenSubdivTokens->none;
+  if (HdTokenDataSourceHandle scheme_source = mesh.GetSubdivisionScheme()) {
+    scheme = scheme_source->GetTypedValue(0.0f);
+  }
+
+  HdMeshTopology topology(scheme, orientation, face_vertex_counts,
+                          face_vertex_indices, hole_indices);
+
+  // Geom subsets are children of the mesh prim in the scene index.
+  HdGeomSubsets geom_subsets;
+  for (const SdfPath& child_path : scene_index->GetChildPrimPaths(id)) {
+    HdSceneIndexPrim child = scene_index->GetPrim(child_path);
+    if (child.primType != HdPrimTypeTokens->geomSubset || !child.dataSource) {
+      continue;
+    }
+    HdGeomSubsetSchema subset_schema =
+        HdGeomSubsetSchema::GetFromParent(child.dataSource);
+    if (!subset_schema.IsDefined()) {
+      continue;
+    }
+    HdTokenDataSourceHandle type = subset_schema.GetType();
+    if (!type ||
+        type->GetTypedValue(0.0f) != HdGeomSubsetSchemaTokens->typeFaceSet) {
+      continue;
+    }
+    HdGeomSubset subset;
+    subset.type = HdGeomSubset::TypeFaceSet;
+    subset.id = child_path;
+    if (HdIntArrayDataSourceHandle indices = subset_schema.GetIndices()) {
+      subset.indices = indices->GetTypedValue(0.0f);
+    }
+    subset.materialId =
+        GetMaterialIdFromDataSource(child.dataSource).value_or(SdfPath());
+    geom_subsets.push_back(std::move(subset));
+  }
+  if (!geom_subsets.empty()) {
+    topology.SetGeomSubsets(geom_subsets);
+  }
+  return topology;
+}
+
+// Subdivision tags from HdMeshSchema's subdivisionTags container; an absent
+// container on a real data source means "no tags" (matching USD authoring).
+PxOsdSubdivTags GetMeshSubdivTags(HdSceneDelegate* sceneDelegate,
+                                  const SdfPath& id) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    PxOsdSubdivTags tags;
+    HdSubdivisionTagsSchema schema =
+        HdMeshSchema::GetFromParent(data_source).GetSubdivisionTags();
+    if (schema.IsDefined()) {
+      if (HdTokenDataSourceHandle t = schema.GetInterpolateBoundary()) {
+        tags.SetVertexInterpolationRule(t->GetTypedValue(0.0f));
+      }
+      if (HdTokenDataSourceHandle t =
+              schema.GetFaceVaryingLinearInterpolation()) {
+        tags.SetFaceVaryingInterpolationRule(t->GetTypedValue(0.0f));
+      }
+      if (HdTokenDataSourceHandle t = schema.GetTriangleSubdivisionRule()) {
+        tags.SetTriangleSubdivision(t->GetTypedValue(0.0f));
+      }
+      if (HdIntArrayDataSourceHandle v = schema.GetCornerIndices()) {
+        tags.SetCornerIndices(v->GetTypedValue(0.0f));
+      }
+      if (HdFloatArrayDataSourceHandle v = schema.GetCornerSharpnesses()) {
+        tags.SetCornerWeights(v->GetTypedValue(0.0f));
+      }
+      if (HdIntArrayDataSourceHandle v = schema.GetCreaseIndices()) {
+        tags.SetCreaseIndices(v->GetTypedValue(0.0f));
+      }
+      if (HdIntArrayDataSourceHandle v = schema.GetCreaseLengths()) {
+        tags.SetCreaseLengths(v->GetTypedValue(0.0f));
+      }
+      if (HdFloatArrayDataSourceHandle v = schema.GetCreaseSharpnesses()) {
+        tags.SetCreaseWeights(v->GetTypedValue(0.0f));
+      }
+    }
+    return tags;
+  }
+  return PxOsdSubdivTags();
+}
+
+// The refine level from the (legacy) display style schema, which application
+// filters (e.g. usdview's complexity setting and the engine's
+// HdsiLegacyDisplayStyleOverrideSceneIndex) write into the scene index.
+int GetMeshRefineLevel(HdSceneDelegate* sceneDelegate, const SdfPath& id) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    HdLegacyDisplayStyleSchema schema =
+        HdLegacyDisplayStyleSchema::GetFromParent(data_source);
+    if (schema.IsDefined()) {
+      if (HdIntDataSourceHandle refine_level = schema.GetRefineLevel()) {
+        return refine_level->GetTypedValue(0.0f);
+      }
+    }
+  }
+  return 0;
+}
+
+std::optional<HdInterpolation> InterpolationFromToken(const TfToken& token) {
+  if (token == HdPrimvarSchemaTokens->constant) return HdInterpolationConstant;
+  if (token == HdPrimvarSchemaTokens->uniform) return HdInterpolationUniform;
+  if (token == HdPrimvarSchemaTokens->varying) return HdInterpolationVarying;
+  if (token == HdPrimvarSchemaTokens->vertex) return HdInterpolationVertex;
+  if (token == HdPrimvarSchemaTokens->faceVarying) {
+    return HdInterpolationFaceVarying;
+  }
+  if (token == HdPrimvarSchemaTokens->instance) return HdInterpolationInstance;
+  return std::nullopt;
+}
+
+using PrimvarDescriptorMap =
+    absl::flat_hash_map<TfToken, HdPrimvarDescriptor, TfToken::HashFunctor>;
+
+// All primvar descriptors of the prim, keyed by name. Schema-native: a single
+// pass over HdPrimvarsSchema (no per-interpolation queries); falls back to
+// per-interpolation scene delegate queries for delegate-fed hosts.
+PrimvarDescriptorMap GetAllMeshPrimvarDescriptors(
+    HdSceneDelegate* sceneDelegate, const SdfPath& id) {
+  PrimvarDescriptorMap descriptors;
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(data_source);
+    if (primvars.IsDefined()) {
+      for (const TfToken& name : primvars.GetPrimvarNames()) {
+        HdPrimvarSchema primvar = primvars.GetPrimvar(name);
+        if (!primvar.IsDefined()) {
+          continue;
+        }
+        HdTokenDataSourceHandle interpolation_source =
+            primvar.GetInterpolation();
+        if (!interpolation_source) {
+          continue;
+        }
+        std::optional<HdInterpolation> interpolation =
+            InterpolationFromToken(interpolation_source->GetTypedValue(0.0f));
+        if (!interpolation.has_value()) {
+          continue;
+        }
+        HdPrimvarDescriptor descriptor;
+        descriptor.name = name;
+        descriptor.interpolation = *interpolation;
+        if (HdTokenDataSourceHandle role = primvar.GetRole()) {
+          descriptor.role = role->GetTypedValue(0.0f);
+        }
+        descriptor.indexed =
+            primvar.GetIndexedPrimvarValue() && primvar.GetIndices();
+        descriptors[name] = descriptor;
+      }
+    }
+    return descriptors;
+  }
+  // No primvars container published: nothing to sync.
+  return descriptors;
+}
+
+// The flattened value of a primvar (indexed primvars are flattened by the
+// primvar schema).
+VtValue GetMeshPrimvarValue(HdSceneDelegate* sceneDelegate, const SdfPath& id,
+                            const TfToken& name) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    HdPrimvarSchema primvar =
+        HdPrimvarsSchema::GetFromParent(data_source).GetPrimvar(name);
+    if (HdSampledDataSourceHandle value = primvar.GetPrimvarValue()) {
+      return value->GetValue(0.0f);
+    }
+    return VtValue();
+  }
+  return VtValue();
+}
+
+// The index array of an indexed primvar (empty for non-indexed primvars).
+VtIntArray GetMeshPrimvarIndices(HdSceneDelegate* sceneDelegate,
+                                 const SdfPath& id, const TfToken& name) {
+  if (HdContainerDataSourceHandle data_source =
+          GetTerminalPrimDataSource(sceneDelegate, id)) {
+    HdPrimvarSchema primvar =
+        HdPrimvarsSchema::GetFromParent(data_source).GetPrimvar(name);
+    if (HdIntArrayDataSourceHandle indices = primvar.GetIndices()) {
+      return indices->GetTypedValue(0.0f);
+    }
+    return VtIntArray();
+  }
+  return VtIntArray();
+}
+
 std::optional<SdfPath> GetAttachedSensorId(HdSceneDelegate* sceneDelegate,
                                            const SdfPath& id) {
-  VtValue attached_sensor = sceneDelegate->Get(id, TfToken("mitsuba:sensor"));
+  VtValue attached_sensor =
+      GetCustomPrimValue(sceneDelegate, id, TfToken("mitsuba:sensor"));
   if (attached_sensor.IsHolding<SdfPath>()) {
     return attached_sensor.Get<SdfPath>();
   } else if (attached_sensor.IsHolding<std::string>()) {
@@ -152,6 +504,12 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   if (*dirtyBits == HdChangeTracker::Clean) {
     return;
   }
+  auto* mitsuba_delegate = dynamic_cast<HdMitsubaRenderDelegate*>(
+      sceneDelegate->GetRenderIndex().GetRenderDelegate());
+  if (mitsuba_delegate && mitsuba_delegate->NativeClaimed(GetId())) {
+    *dirtyBits = HdChangeTracker::Clean;
+    return;
+  }
   _UpdateInstancer(sceneDelegate, dirtyBits);
   HdInstancer::_SyncInstancerAndParents(sceneDelegate->GetRenderIndex(),
                                         GetInstancerId());
@@ -161,7 +519,7 @@ void HdMitsubaMesh::Sync(HdSceneDelegate* sceneDelegate,
   auto* scene = mitsuba_render_param->GetScene();
 
   // Visibility changes can make the mesh visible or invisible.
-  bool visible = sceneDelegate->GetVisible(GetId());
+  bool visible = GetMeshVisibility(sceneDelegate, GetId());
   if ((*dirtyBits & HdChangeTracker::DirtyVisibility) && visible) {
     *dirtyBits |= HdChangeTracker::AllDirty;
   }
@@ -215,20 +573,21 @@ void HdMitsubaMesh::_InitRepr(const TfToken& reprToken,
 
 void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate) {
   TRACE_FUNCTION();
-  const HdDisplayStyle display_style = GetDisplayStyle(sceneDelegate);
-
-  int refineLevel = display_style.refineLevel;
-  VtValue subdivLevelValue =
-      sceneDelegate->Get(GetId(), HdMitsubaMeshTokens->subdivision_level);
+  int refineLevel = GetMeshRefineLevel(sceneDelegate, GetId());
+  VtValue subdivLevelValue = GetCustomPrimValue(
+      sceneDelegate, GetId(), HdMitsubaMeshTokens->subdivision_level);
   if (!subdivLevelValue.IsEmpty() && subdivLevelValue.IsHolding<int>()) {
     refineLevel = subdivLevelValue.Get<int>();
   }
+  std::optional<HdMeshTopology> scene_index_topology =
+      GetMeshTopologyFromSceneIndex(sceneDelegate, GetId());
   HdMeshTopology topology =
-      HdMeshTopology(GetMeshTopology(sceneDelegate), refineLevel);
+      HdMeshTopology(scene_index_topology.value_or(HdMeshTopology()),
+                     refineLevel);
 
   const HdGeomSubsets& geom_subsets = topology.GetGeomSubsets();
   const int num_coarse_faces = topology.GetNumFaces();
-  const SdfPath material_id = sceneDelegate->GetMaterialId(GetId());
+  const SdfPath material_id = GetMeshMaterialId(sceneDelegate, GetId());
   material_ids_.clear();
   material_ids_.push_back(material_id);
   face_material_indices_.assign(num_coarse_faces, 0);
@@ -259,14 +618,17 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate) {
   if (fvar_interp_rule != PxOsdOpenSubdivTokens->all && refineLevel > 0 &&
       (scheme == PxOsdOpenSubdivTokens->catmullClark ||
        scheme == PxOsdOpenSubdivTokens->loop)) {
-    auto fv_primvars =
-        GetPrimvarDescriptors(sceneDelegate, HdInterpolationFaceVarying);
-    for (const auto& primvar : fv_primvars) {
+    for (const auto& [name, primvar] :
+         GetAllMeshPrimvarDescriptors(sceneDelegate, GetId())) {
+      if (primvar.interpolation != HdInterpolationFaceVarying) {
+        continue;
+      }
       VtIntArray indices;
       if (primvar.indexed) {
-        GetIndexedPrimvar(sceneDelegate, primvar.name, &indices);
+        indices = GetMeshPrimvarIndices(sceneDelegate, GetId(), primvar.name);
       } else {
-        VtValue value = GetPrimvar(sceneDelegate, primvar.name);
+        VtValue value = GetMeshPrimvarValue(sceneDelegate, GetId(),
+                                            primvar.name);
         if (!value.IsEmpty()) {
           const int num_face_varyings = topology.GetNumFaceVaryings();
           indices.resize(num_face_varyings);
@@ -288,7 +650,7 @@ void HdMitsubaMesh::SyncTopology(HdSceneDelegate* sceneDelegate) {
     }
   }
 
-  topology.SetSubdivTags(GetSubdivTags(sceneDelegate));
+  topology.SetSubdivTags(GetMeshSubdivTags(sceneDelegate, GetId()));
 
   subdiv_evaluator_.Initialize(topology.GetPxOsdMeshTopology(), refineLevel,
                                scheme, topology.GetSubdivTags(),
@@ -350,7 +712,7 @@ void HdMitsubaMesh::UpdateScene(HdSceneDelegate* sceneDelegate,
   spec.id = id;
   spec.material_ids = material_ids_;
   spec.primvars = primvars;
-  spec.transform = sceneDelegate->GetTransform(id);
+  spec.transform = GetMeshTransform(sceneDelegate, id);
   spec.attached_sensor_id = attached_sensor_id;
   spec.emitter_spec = emitter_spec;
   spec.instance_transforms = instance_transforms;
@@ -384,29 +746,14 @@ void HdMitsubaMesh::RemoveFromScene(SceneManager* scene) {
   }
 }
 
-absl::flat_hash_map<TfToken, HdPrimvarDescriptor, TfToken::HashFunctor>
-HdMitsubaMesh::GetAllPrimvarDescriptors(HdSceneDelegate* sceneDelegate) {
-  static const HdInterpolation interpolations[] = {
-      HdInterpolationConstant, HdInterpolationUniform, HdInterpolationVertex,
-      HdInterpolationFaceVarying, HdInterpolationVarying};
-  absl::flat_hash_map<TfToken, HdPrimvarDescriptor, TfToken::HashFunctor>
-      primvar_descriptors;
-  for (const auto& interpolation : interpolations) {
-    auto descriptors = GetPrimvarDescriptors(sceneDelegate, interpolation);
-    for (const auto& descriptor : descriptors) {
-      primvar_descriptors[descriptor.name] = descriptor;
-    }
-  }
-  return primvar_descriptors;
-}
-
 HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
     HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits) {
   TRACE_FUNCTION();
   TF_DEBUG(HDMITSUBA_SYNC)
       .Msg("SyncPrimvars for %s dirtyBits: %d subdivided: %d\n",
            GetId().GetText(), *dirtyBits, subdiv_evaluator_.IsSubdivided());
-  auto primvar_descriptors = GetAllPrimvarDescriptors(sceneDelegate);
+  auto primvar_descriptors =
+      GetAllMeshPrimvarDescriptors(sceneDelegate, GetId());
 
   // Remove primvars that no longer exist from the primvar map.
   // Protect built-in geometric attributes (points, normals) from removal.
@@ -428,32 +775,13 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
 
   bool transform_dirty = *dirtyBits & HdChangeTracker::DirtyTransform;
 
-  // Query and evaluate computed primvars.
-  HdExtComputationPrimvarDescriptorVector computed_primvar_descs;
-  for (size_t i = 0; i < HdInterpolationCount; ++i) {
-    HdInterpolation interp = static_cast<HdInterpolation>(i);
-    auto descs = sceneDelegate->GetExtComputationPrimvarDescriptors(id, interp);
-    for (const auto& desc : descs) {
-      if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, desc.name) ||
-          transform_dirty) {
-        computed_primvar_descs.push_back(desc);
-      }
-    }
-  }
-
-  HdExtComputationUtils::ValueStore computed_values;
-  if (!computed_primvar_descs.empty()) {
-    computed_values = HdExtComputationUtils::GetComputedPrimvarValues(
-        computed_primvar_descs, sceneDelegate);
-  }
-
-  // Helper to resolve the value (computed vs standard)
+  // Computed primvars (e.g. UsdSkel skinning) need no special handling here:
+  // the HdMitsubaExtComputationPrimvarPruningSceneIndexPlugin scene index —
+  // appended for the Mitsuba renderer by the render index itself — evaluates
+  // ext computations and presents their outputs as plain primvars, so they
+  // arrive through the regular primvar reads below.
   auto resolve_primvar_value = [&](const TfToken& name) -> VtValue {
-    auto it = computed_values.find(name);
-    if (it != computed_values.end()) {
-      return it->second;
-    }
-    return GetPrimvar(sceneDelegate, name);
+    return GetMeshPrimvarValue(sceneDelegate, id, name);
   };
 
   // Helper to sync and optionally refine a primvar
@@ -528,6 +856,95 @@ HdMitsubaMesh::PrimvarMap HdMitsubaMesh::SyncPrimvars(
     }
   }
   return primvars_;
+}
+
+void TranslateMeshPrim(const HdSceneIndexBaseRefPtr& scene_index,
+                       const SdfPath& id, HdDirtyBits dirty_bits,
+                       MeshTranslationState* /*state*/,
+                       SceneManager* scene_manager) {
+  HdSceneIndexPrim prim = scene_index->GetPrim(id);
+  if (!prim.dataSource) {
+    return;
+  }
+
+  // 1. Visibility
+  static const HdDataSourceLocator visibility_locator(
+      HdVisibilitySchema::GetSchemaToken(),
+      HdVisibilitySchemaTokens->visibility);
+  const bool visible = GetParam<bool>(prim.dataSource, visibility_locator, true);
+  if (!visible) {
+    scene_manager->RemoveShape(id);
+    return;
+  }
+
+  MeshSpec spec;
+  spec.id = id;
+  spec.transform = GetWorldTransform(*scene_index, id);
+  spec.dirty_bits = dirty_bits;
+
+  HdMeshSchema mesh_schema = HdMeshSchema::GetFromParent(prim.dataSource);
+  if (mesh_schema.IsDefined()) {
+    HdMeshTopologySchema top_schema = mesh_schema.GetTopology();
+    if (top_schema.IsDefined()) {
+      if (HdIntArrayDataSourceHandle counts_ds =
+              top_schema.GetFaceVertexCounts()) {
+        spec.face_vertex_counts = counts_ds->GetTypedValue(0.0f);
+      }
+      if (HdIntArrayDataSourceHandle indices_ds =
+              top_schema.GetFaceVertexIndices()) {
+        spec.face_vertex_indices = indices_ds->GetTypedValue(0.0f);
+      }
+    }
+    if (HdTokenDataSourceHandle scheme_ds =
+            mesh_schema.GetSubdivisionScheme()) {
+      TfToken scheme = scheme_ds->GetTypedValue(0.0f);
+      spec.is_subdivided =
+          (scheme == PxOsdOpenSubdivTokens->catmullClark ||
+           scheme == PxOsdOpenSubdivTokens->loop);
+    }
+  }
+
+  SdfPath mat_path = GetBoundMaterial(*scene_index, id);
+  if (!mat_path.IsEmpty()) {
+    spec.material_ids.push_back(mat_path);
+  }
+
+  ExtractPrimvars(prim.dataSource, spec.primvars);
+
+  HdLightSchema light_schema = HdLightSchema::GetFromParent(prim.dataSource);
+  if (light_schema.IsDefined()) {
+    LightSpec emitter_spec;
+    emitter_spec.id = id;
+    emitter_spec.prim_type = prim.primType;
+    emitter_spec.transform = UsdToMitsubaTransform(spec.transform);
+
+    GfVec3f color(1.0f, 1.0f, 1.0f);
+    float intensity = 1.0f;
+    float exposure = 0.0f;
+
+    auto color_it = spec.primvars.find(TfToken("inputs:color"));
+    if (color_it != spec.primvars.end() && color_it->second.value.IsHolding<GfVec3f>()) {
+      color = color_it->second.value.Get<GfVec3f>();
+    }
+    auto intensity_it = spec.primvars.find(TfToken("inputs:intensity"));
+    if (intensity_it != spec.primvars.end() &&
+        intensity_it->second.value.IsHolding<float>()) {
+      intensity = intensity_it->second.value.Get<float>();
+    }
+    auto exposure_it = spec.primvars.find(TfToken("inputs:exposure"));
+    if (exposure_it != spec.primvars.end() &&
+        exposure_it->second.value.IsHolding<float>()) {
+      exposure = exposure_it->second.value.Get<float>();
+    }
+
+    float total_intensity = intensity * std::pow(2.0f, exposure);
+    emitter_spec.emission = GfVec3f(color[0] * total_intensity,
+                                    color[1] * total_intensity,
+                                    color[2] * total_intensity);
+    spec.emitter_spec = emitter_spec;
+  }
+
+  scene_manager->SyncMesh(std::move(spec));
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -28,6 +28,7 @@
 #include <variant>
 #include <vector>
 
+#include <absl/base/no_destructor.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/match.h>
@@ -69,6 +70,7 @@
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/renderPass.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
+#include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/pxr.h>
@@ -658,6 +660,12 @@ class SceneModel final : public SceneManager {
     if (prev_it == camera_specs_.end()) {
       spec.needs_rebuild = true;
     }
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != camera_specs_.end() && prev_it->second.needs_rebuild) {
+      spec.needs_rebuild = true;
+    }
     if (prev_it != camera_specs_.end() && !spec.needs_rebuild) {
       spec.dirty_bits |= prev_it->second.dirty_bits;
     }
@@ -675,6 +683,12 @@ class SceneModel final : public SceneManager {
     absl::MutexLock lock(state_mutex_);
     auto prev_it = mesh_specs_.find(spec.id);
     if (prev_it == mesh_specs_.end()) {
+      spec.needs_rebuild = true;
+    }
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != mesh_specs_.end() && prev_it->second.needs_rebuild) {
       spec.needs_rebuild = true;
     }
     if (prev_it != mesh_specs_.end() && !spec.needs_rebuild) {
@@ -715,6 +729,12 @@ class SceneModel final : public SceneManager {
     if (prev_it == light_specs_.end()) {
       spec.needs_rebuild = true;
     }
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != light_specs_.end() && prev_it->second.needs_rebuild) {
+      spec.needs_rebuild = true;
+    }
     if (prev_it != light_specs_.end() && !spec.needs_rebuild) {
       spec.dirty_bits |= prev_it->second.dirty_bits;
     }
@@ -722,12 +742,133 @@ class SceneModel final : public SceneManager {
     reset_progressive_ = true;
   }
 
+  bool UpdateMaterialValues(
+      const SdfPath& id, const SdfPath& node_path,
+      const std::vector<std::pair<TfToken, VtValue>>& changes) override {
+    // USD parameter -> Mitsuba traversal-name suffix, for parameters whose
+    // value maps 1:1 onto a live principled-BSDF slot. Anything else falls
+    // back to the twin-based update.
+    static const absl::NoDestructor<
+        absl::flat_hash_map<TfToken, std::string, TfToken::HashFunctor>>
+        kParamToTraversalSuffix({
+            {TfToken("diffuseColor"), "base_color.value"},
+            {TfToken("roughness"), "roughness.value"},
+            {TfToken("metallic"), "metallic.value"},
+        });
+
+    absl::MutexLock lock(state_mutex_);
+    auto bsdf_it = bsdfs_.find(id.GetAsString());
+    if (bsdf_it == bsdfs_.end()) {
+      return false;
+    }
+    auto spec_it = material_specs_.find(id);
+    if (spec_it == material_specs_.end() || spec_it->second.needs_rebuild ||
+        spec_it->second.dirty_bits != 0) {
+      // A pending full sync supersedes a targeted write.
+      return false;
+    }
+    auto node_it = spec_it->second.network2.nodes.find(node_path);
+    if (node_it == spec_it->second.network2.nodes.end()) {
+      return false;
+    }
+
+    std::vector<std::pair<std::string, VtValue>> writes;
+    writes.reserve(changes.size());
+    for (const auto& [param, value] : changes) {
+      auto map_it = kParamToTraversalSuffix->find(param);
+      if (map_it == kParamToTraversalSuffix->end()) {
+        return false;
+      }
+      writes.emplace_back(map_it->second, value);
+    }
+
+    {
+      JitScopeGuard<Float> jit_guard;
+      // Slot resolution walks the object tree; cache it per material and
+      // invalidate whenever the live BSDF object changes (rebuilds).
+      auto cache_it = material_param_slots_.find(id.GetAsString());
+      if (cache_it == material_param_slots_.end() ||
+          cache_it->second.first != bsdf_it->second.get()) {
+        cache_it = material_param_slots_
+                       .insert_or_assign(
+                           id.GetAsString(),
+                           std::make_pair(
+                               static_cast<const mitsuba::Object*>(
+                                   bsdf_it->second.get()),
+                               PrimTranslator::ResolveMaterialParamSlots(
+                                   bsdf_it->second.get())))
+                       .first;
+      }
+      if (!PrimTranslator::ApplyMaterialParamValues(cache_it->second.second,
+                                                    writes)) {
+        return false;
+      }
+    }
+
+    // Keep the stored network current so later structural diffs and
+    // variant-switch reseeding see the live values.
+    for (const auto& [param, value] : changes) {
+      node_it->second.parameters[param] = value;
+    }
+    reset_progressive_ = true;
+    return true;
+  }
+
   void SyncMaterial(MaterialSpec spec) override {
     TRACE_FUNCTION();
     TF_DEBUG(HDMITSUBA_SYNC).Msg("SyncMaterial: %s\n", spec.id.GetText());
     absl::MutexLock lock(state_mutex_);
+    auto prev_it = material_specs_.find(spec.id);
+    // A pending rebuild must not be downgraded by a later value-only sync
+    // before a commit has consumed it (e.g. the native scene index backend
+    // translating a prim's add and a same-frame dirty notification).
+    if (prev_it != material_specs_.end() &&
+        prev_it->second.needs_rebuild) {
+      spec.needs_rebuild = true;
+    }
     material_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;
+  }
+
+  const MeshSpecMap& GetMeshSpecs() const override { return mesh_specs_; }
+  const CurveSpecMap& GetCurveSpecs() const override { return curve_specs_; }
+  const CameraSpecMap& GetCameraSpecs() const override {
+    return camera_specs_;
+  }
+  const LightSpecMap& GetLightSpecs() const override { return light_specs_; }
+  const MaterialSpecMap& GetMaterialSpecs() const override {
+    return material_specs_;
+  }
+
+  void SeedSpecsFrom(const SceneManager& previous) override {
+    TF_DEBUG(HDMITSUBA_LIFECYCLE)
+        .Msg("SeedSpecsFrom: %zu meshes, %zu curves, %zu cameras, "
+             "%zu lights, %zu materials\n",
+             previous.GetMeshSpecs().size(), previous.GetCurveSpecs().size(),
+             previous.GetCameraSpecs().size(), previous.GetLightSpecs().size(),
+             previous.GetMaterialSpecs().size());
+    // Sync order: materials first so that meshes committed later resolve
+    // them; every spec is forced to a full rebuild in this manager.
+    auto seed = [](auto spec, auto&& sync) {
+      spec.needs_rebuild = true;
+      spec.dirty_bits = 0;
+      sync(std::move(spec));
+    };
+    for (const auto& [id, spec] : previous.GetMaterialSpecs()) {
+      seed(spec, [this](MaterialSpec s) { SyncMaterial(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetCameraSpecs()) {
+      seed(spec, [this](CameraSpec s) { SyncCamera(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetLightSpecs()) {
+      seed(spec, [this](LightSpec s) { SyncLight(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetMeshSpecs()) {
+      seed(spec, [this](MeshSpec s) { SyncMesh(std::move(s)); });
+    }
+    for (const auto& [id, spec] : previous.GetCurveSpecs()) {
+      seed(spec, [this](CurveSpec s) { SyncCurves(std::move(s)); });
+    }
   }
 
   void RemoveShape(const SdfPath& id) override {
@@ -1053,21 +1194,45 @@ class SceneModel final : public SceneManager {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
     {
-      auto it = namespaced_settings.find("mitsuba:integrator:type");
-      if (it != namespaced_settings.end()) {
-        std::string integrator_type = it->second.Get<std::string>();
-        if (integrator_type != integrator_type_ || !integrator_) {
-          TF_DEBUG(HDMITSUBA_LIFECYCLE)
-              .Msg("Creating integrator, type: %s (was: %s)\n",
-                   integrator_type.c_str(), integrator_type_.c_str());
-          Properties integrator_props(integrator_type);
-          integrator_ = PluginManager::instance()->create_object<Integrator>(
-              integrator_props);
-          integrator_type_ = integrator_type;
-          for (auto& [_, pass_state] : pass_aov_states_) {
-            pass_state.aov_integrator = nullptr;
+      std::vector<TfToken> ds_names;
+      std::vector<HdDataSourceBaseHandle> ds_sources;
+      for (const auto& [k, v] : namespaced_settings) {
+        ds_names.push_back(TfToken(k));
+        ds_sources.push_back(
+            HdRetainedTypedSampledDataSource<VtValue>::New(v));
+      }
+      HdContainerDataSourceHandle flat_ds =
+          HdRetainedContainerDataSource::New(
+              ds_names.size(), ds_names.data(), ds_sources.data());
+      HdContainerDataSourceHandle unflattened =
+          UnflattenContainer(flat_ds, ':');
+
+      if (unflattened) {
+        HdContainerDataSourceHandle mitsuba_ds =
+            HdContainerDataSource::Cast(unflattened->Get(TfToken("mitsuba")));
+        HdContainerDataSourceHandle integrator_ds =
+            mitsuba_ds ? HdContainerDataSource::Cast(
+                             mitsuba_ds->Get(TfToken("integrator")))
+                       : nullptr;
+
+        if (integrator_ds) {
+          Properties integrator_props = ContainerToMitsubaProperties(
+              integrator_ds, "path", Integrator::Variant);
+          std::string integrator_type =
+              std::string(integrator_props.plugin_name());
+          if (integrator_type != integrator_type_ || !integrator_) {
+            TF_DEBUG(HDMITSUBA_LIFECYCLE)
+                .Msg("Creating integrator, type: %s (was: %s)\n",
+                     integrator_type.c_str(), integrator_type_.c_str());
+            integrator_ = mitsuba::ref<Integrator>(static_cast<Integrator*>(
+                BuildPluginFromProperties(integrator_props, Integrator::Variant)
+                    .get()));
+            integrator_type_ = integrator_type;
+            for (auto& [_, pass_state] : pass_aov_states_) {
+              pass_state.aov_integrator = nullptr;
+            }
+            reset_progressive_ = true;
           }
-          reset_progressive_ = true;
         }
       }
     }
@@ -1247,16 +1412,19 @@ class SceneModel final : public SceneManager {
         material_specs_,
         [&](MaterialSpec* spec,
             typename PrimTranslator::TranslatedMaterial& res) {
+          if (!spec->needs_rebuild && spec->dirty_bits != 0) {
+            auto bsdf_it = bsdfs_.find(spec->id.GetAsString());
+            if (bsdf_it == bsdfs_.end() ||
+                !PrimTranslator::UpdateMaterialInPlace(bsdf_it->second.get(),
+                                                       *spec,
+                                                       texture_cache_)) {
+              // The edit could not be applied faithfully in place; fall back
+              // to a full rebuild of the material.
+              spec->needs_rebuild = true;
+            }
+          }
           if (spec->needs_rebuild) {
             res = PrimTranslator::BuildMaterial(*spec, texture_cache_);
-          } else if (spec->dirty_bits != 0) {
-            auto bsdf_it = bsdfs_.find(spec->id.GetAsString());
-            if (!TF_VERIFY(bsdf_it != bsdfs_.end(), "Material not found: %s",
-                           spec->id.GetText())) {
-              return;
-            }
-            PrimTranslator::UpdateMaterialInPlace(bsdf_it->second.get(), *spec,
-                                                  texture_cache_);
           }
         },
         [&](MaterialSpec* spec,
@@ -1793,6 +1961,11 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
   absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
+  absl::flat_hash_map<
+      std::string,
+      std::pair<const mitsuba::Object*,
+                typename PrimTranslator::MaterialParamSlots>>
+      material_param_slots_;
   absl::flat_hash_map<std::string, ref<Texture>> displacement_textures_;
   absl::flat_hash_map<std::string, mitsuba::Properties> material_emitters_;
   ref<BSDF> default_bsdf_ = nullptr;

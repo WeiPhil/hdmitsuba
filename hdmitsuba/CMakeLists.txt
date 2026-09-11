@@ -33,6 +33,8 @@ add_library(hdMitsuba SHARED
   render_pass.cc
   render_settings.cc
   renderer_plugin.cc
+  scene_index_backend.cc
+  scene_index_plugin.cc
   scene_manager.cc
   particle_field.cc
   traversal.cc
@@ -57,6 +59,7 @@ target_link_libraries(hdMitsuba
     arch
     gf
     hd
+    hdsi
     hdx
     pxOsd
     sdf
@@ -155,13 +158,18 @@ if(HDMITSUBA_BUILD_TESTS)
       target_link_libraries(${Name} PRIVATE ${DRJIT_EXTRA_LIBRARY})
     endif()
     add_test(NAME ${Name} COMMAND ${Name})
-    set_tests_properties(${Name} PROPERTIES ENVIRONMENT "HDMITSUBA_VARIANT=scalar_rgb")
+    # The usd_imaging_mitsuba plugin path makes the Hydra 2.0 keyless API
+    # schema adapter (custom mitsuba:* attributes) discoverable in tests.
+    set_tests_properties(${Name} PROPERTIES ENVIRONMENT
+      "HDMITSUBA_VARIANT=scalar_rgb;PXR_PLUGINPATH_NAME=${CMAKE_BINARY_DIR}/usd_imaging_mitsuba")
   endfunction()
 
   add_hdmitsuba_test(camera_test tests/camera_test.cc)
   add_hdmitsuba_test(mesh_test tests/mesh_test.cc)
   add_hdmitsuba_test(geometry_processor_test mesh/tests/geometry_processor_test.cc)
   add_hdmitsuba_test(subdivision_test mesh/tests/subdivision_test.cc)
+  add_hdmitsuba_test(scene_index_test tests/scene_index_test.cc)
+  add_hdmitsuba_test(container_translator_test tests/container_translator_test.cc)
 endif()
 
 # --- Installation Rules ---

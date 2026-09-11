@@ -58,8 +58,11 @@
 #include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/quatf.h>
 #include <pxr/base/gf/rotation.h>
+#include <pxr/base/gf/vec2d.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
+#include <pxr/base/gf/vec4d.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/plug/plugin.h>
 #include <pxr/base/plug/registry.h>
@@ -69,6 +72,7 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/material.h>
+#include <pxr/imaging/hd/retainedDataSource.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/ar/asset.h>
@@ -150,54 +154,287 @@ bool UseRawBitmap(const TfToken& source_color_space,
 void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const VtValue& val,
                                  bool invert_float) {
+  if (val.IsEmpty()) return;
+
   if (val.IsHolding<GfVec3f>()) {
-    auto c = val.Get<GfVec3f>();
-    props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]));
+    auto c = val.UncheckedGet<GfVec3f>();
+    props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]), false);
   } else if (val.IsHolding<GfVec4f>()) {
     // Mitsuba never uses alpha channels, so we ignore it.
-    auto c = val.Get<GfVec4f>();
-    props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]));
+    auto c = val.UncheckedGet<GfVec4f>();
+    props.set(name, mitsuba::Color<float, 3>(c[0], c[1], c[2]), false);
   } else if (val.IsHolding<GfVec3d>()) {
-    auto c = val.Get<GfVec3d>();
+    auto c = val.UncheckedGet<GfVec3d>();
     props.set(name, mitsuba::Color<float, 3>(static_cast<float>(c[0]),
                                              static_cast<float>(c[1]),
-                                             static_cast<float>(c[2])));
+                                             static_cast<float>(c[2])), false);
+  } else if (val.IsHolding<GfVec4d>()) {
+    auto c = val.UncheckedGet<GfVec4d>();
+    props.set(name, mitsuba::Color<float, 3>(static_cast<float>(c[0]),
+                                             static_cast<float>(c[1]),
+                                             static_cast<float>(c[2])), false);
+  } else if (val.IsHolding<GfVec2f>()) {
+    auto p = val.UncheckedGet<GfVec2f>();
+    props.set(name, mitsuba::Vector<float, 3>(p[0], p[1], 0.0f), false);
+  } else if (val.IsHolding<GfVec2d>()) {
+    auto p = val.UncheckedGet<GfVec2d>();
+    props.set(name, mitsuba::Vector<float, 3>(static_cast<float>(p[0]),
+                                              static_cast<float>(p[1]),
+                                              0.0f), false);
   } else if (val.IsHolding<float>()) {
-    props.set(name, invert_float ? 1.0f - val.Get<float>() : val.Get<float>());
+    props.set(name, invert_float ? 1.0f - val.UncheckedGet<float>() : val.UncheckedGet<float>(), false);
   } else if (val.IsHolding<double>()) {
-    props.set(name, invert_float ? 1.0f - static_cast<float>(val.Get<double>())
-                                 : static_cast<float>(val.Get<double>()));
+    props.set(name, invert_float ? 1.0f - static_cast<float>(val.UncheckedGet<double>())
+                                 : static_cast<float>(val.UncheckedGet<double>()), false);
   } else if (val.IsHolding<bool>()) {
-    props.set(name, val.Get<bool>());
+    props.set(name, val.UncheckedGet<bool>(), false);
   } else if (val.IsHolding<int>()) {
-    props.set(name, val.Get<int>());
+    props.set(name, val.UncheckedGet<int>(), false);
+  } else if (val.IsHolding<int64_t>()) {
+    props.set(name, val.UncheckedGet<int64_t>(), false);
+  } else if (val.IsHolding<uint32_t>()) {
+    props.set(name, static_cast<int64_t>(val.UncheckedGet<uint32_t>()), false);
+  } else if (val.IsHolding<size_t>()) {
+    props.set(name, static_cast<int64_t>(val.UncheckedGet<size_t>()), false);
   } else if (val.IsHolding<GfMatrix3f>()) {
-    auto m = val.Get<GfMatrix3f>();
+    auto m = val.UncheckedGet<GfMatrix3f>();
     dr::Matrix<float, 3> matrix(m[0][0], m[0][1], m[0][2], m[1][0], m[1][1],
                                 m[1][2], m[2][0], m[2][1], m[2][2]);
-    props.set(name, mitsuba::Transform<mitsuba::Point<float, 3>, true>(matrix));
+    props.set(name, mitsuba::Transform<mitsuba::Point<float, 3>, true>(matrix), false);
   } else if (val.IsHolding<GfMatrix3d>()) {
-    auto m = val.Get<GfMatrix3d>();
+    auto m = val.UncheckedGet<GfMatrix3d>();
     dr::Matrix<float, 3> matrix(m[0][0], m[0][1], m[0][2], m[1][0], m[1][1],
                                 m[1][2], m[2][0], m[2][1], m[2][2]);
-    props.set(name, mitsuba::Transform<mitsuba::Point<float, 3>, true>(matrix));
+    props.set(name, mitsuba::Transform<mitsuba::Point<float, 3>, true>(matrix), false);
   } else if (val.IsHolding<GfMatrix4f>()) {
-    auto m = val.Get<GfMatrix4f>();
+    auto m = val.UncheckedGet<GfMatrix4f>();
     dr::Matrix<float, 4> matrix(
         m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3],
         m[2][0], m[2][1], m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3]);
-    props.set(name, ScalarAffineTransform4f(matrix));
+    props.set(name, ScalarAffineTransform4f(matrix), false);
   } else if (val.IsHolding<GfMatrix4d>()) {
-    auto m = val.Get<GfMatrix4d>();
+    auto m = val.UncheckedGet<GfMatrix4d>();
     dr::Matrix<float, 4> matrix(
         m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3],
         m[2][0], m[2][1], m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3]);
-    props.set(name, ScalarAffineTransform4f(matrix));
+    props.set(name, ScalarAffineTransform4f(matrix), false);
   } else if (val.IsHolding<std::string>()) {
-    props.set(name, val.Get<std::string>());
+    props.set(name, val.UncheckedGet<std::string>(), false);
   } else if (val.IsHolding<TfToken>()) {
-    props.set(name, val.Get<TfToken>().GetString());
+    props.set(name, val.UncheckedGet<TfToken>().GetString(), false);
+  } else if (val.IsHolding<SdfAssetPath>()) {
+    const auto& asset = val.UncheckedGet<SdfAssetPath>();
+    std::string path = asset.GetResolvedPath().empty() ? asset.GetAssetPath()
+                                                       : asset.GetResolvedPath();
+    props.set(name, path, false);
+  } else if (val.IsHolding<mitsuba::ref<mitsuba::Object>>()) {
+    props.set(name, val.UncheckedGet<mitsuba::ref<mitsuba::Object>>(), false);
   }
+}
+
+HdContainerDataSourceHandle UnflattenContainer(
+    const HdContainerDataSourceHandle& container,
+    char delimiter) {
+  if (!container) return nullptr;
+
+  std::map<std::string, std::vector<std::pair<TfToken, HdDataSourceBaseHandle>>> grouped;
+  std::vector<TfToken> leaf_names;
+  std::vector<HdDataSourceBaseHandle> leaf_sources;
+
+  for (const TfToken& name : container->GetNames()) {
+    std::string str = name.GetString();
+    size_t pos = str.find(delimiter);
+    if (pos != std::string::npos) {
+      std::string prefix = str.substr(0, pos);
+      std::string suffix = str.substr(pos + 1);
+      grouped[prefix].emplace_back(TfToken(suffix), container->Get(name));
+    } else {
+      HdDataSourceBaseHandle ds = container->Get(name);
+      if (auto child_container = HdContainerDataSource::Cast(ds)) {
+        leaf_names.push_back(name);
+        leaf_sources.push_back(UnflattenContainer(child_container, delimiter));
+      } else {
+        leaf_names.push_back(name);
+        leaf_sources.push_back(ds);
+      }
+    }
+  }
+
+  if (grouped.empty()) {
+    return container;
+  }
+
+  for (const auto& [prefix, children] : grouped) {
+    std::vector<TfToken> group_names;
+    std::vector<HdDataSourceBaseHandle> group_sources;
+    group_names.reserve(children.size());
+    group_sources.reserve(children.size());
+    for (const auto& [child_name, child_ds] : children) {
+      group_names.push_back(child_name);
+      group_sources.push_back(child_ds);
+    }
+    HdContainerDataSourceHandle temp = HdRetainedContainerDataSource::New(
+        group_names.size(), group_names.data(), group_sources.data());
+    leaf_names.push_back(TfToken(prefix));
+    leaf_sources.push_back(UnflattenContainer(temp, delimiter));
+  }
+
+  return HdRetainedContainerDataSource::New(
+      leaf_names.size(), leaf_names.data(), leaf_sources.data());
+}
+
+mitsuba::Properties ContainerToMitsubaProperties(
+    const HdContainerDataSourceHandle& container,
+    std::string_view default_plugin_type,
+    std::string_view variant) {
+  if (!container) {
+    return mitsuba::Properties(default_plugin_type);
+  }
+
+  static const TfToken kTypeToken("type");
+  static const TfToken kIdToken("id");
+
+  std::string plugin_type(default_plugin_type);
+
+  auto extract_string_token = [&](const HdContainerDataSourceHandle& c,
+                                  const TfToken& key) -> std::optional<std::string> {
+    if (!c) return std::nullopt;
+    if (auto ds = HdSampledDataSource::Cast(c->Get(key))) {
+      VtValue v = ds->GetValue(0.0f);
+      if (v.IsHolding<std::string>()) return v.UncheckedGet<std::string>();
+      if (v.IsHolding<TfToken>()) return v.UncheckedGet<TfToken>().GetString();
+    }
+    return std::nullopt;
+  };
+
+  auto resolve_plugin_name = [&](const HdContainerDataSourceHandle& c) -> std::string {
+    std::string res;
+    if (auto t = extract_string_token(c, kTypeToken)) res = *t;
+
+    if (res.rfind("mitsuba_", 0) == 0) {
+      res = res.substr(8);
+    } else if (res.rfind("mitsuba:", 0) == 0) {
+      res = res.substr(8);
+    }
+    return res;
+  };
+
+  std::string found_type = resolve_plugin_name(container);
+  if (!found_type.empty()) {
+    plugin_type = found_type;
+  }
+
+  mitsuba::Properties props(plugin_type);
+
+  if (auto id = extract_string_token(container, kIdToken)) {
+    props.set_id(*id);
+  }
+
+  for (const TfToken& name : container->GetNames()) {
+    if (name == kTypeToken || name == kIdToken) {
+      continue;
+    }
+
+    HdDataSourceBaseHandle child_ds = container->Get(name);
+    if (!child_ds) continue;
+
+    std::string name_str = name.GetString();
+
+    if (auto child_container = HdContainerDataSource::Cast(child_ds)) {
+      std::string child_plugin_type = resolve_plugin_name(child_container);
+
+      if (!child_plugin_type.empty() && !variant.empty()) {
+        mitsuba::ref<mitsuba::Object> child_obj =
+            BuildPluginFromContainer(child_container, variant, child_plugin_type);
+        if (child_obj) {
+          props.set(name_str, child_obj.get(), false);
+        }
+      } else {
+        mitsuba::Properties child_props =
+            ContainerToMitsubaProperties(child_container, child_plugin_type, variant);
+        if (!child_props.plugin_name().empty() && !variant.empty()) {
+          mitsuba::ref<mitsuba::Object> child_obj =
+              BuildPluginFromProperties(child_props, variant);
+          if (child_obj) {
+            props.set(name_str, child_obj.get(), false);
+          }
+        } else {
+          for (const auto& prop : child_props) {
+            std::string sub_key = name_str + "." + std::string(prop.name());
+            switch (prop.type()) {
+              case mitsuba::Properties::Type::Bool:
+                props.set(sub_key, child_props.get<bool>(prop.name()), false);
+                break;
+              case mitsuba::Properties::Type::Integer:
+                props.set(sub_key, child_props.get<int64_t>(prop.name()), false);
+                break;
+              case mitsuba::Properties::Type::Float:
+                props.set(sub_key, child_props.get<double>(prop.name()), false);
+                break;
+              case mitsuba::Properties::Type::String:
+                props.set(sub_key, child_props.get<std::string>(prop.name()), false);
+                break;
+              case mitsuba::Properties::Type::Color:
+                props.set(sub_key, child_props.get<mitsuba::Color<double, 3>>(prop.name()), false);
+                break;
+              case mitsuba::Properties::Type::Vector:
+                props.set(sub_key, child_props.get<dr::Array<double, 3>>(prop.name()), false);
+                break;
+              case mitsuba::Properties::Type::Transform:
+                props.set(sub_key, child_props.get<ScalarAffineTransform4f>(prop.name()), false);
+                break;
+              case mitsuba::Properties::Type::Object:
+                props.set(sub_key, child_props.get<mitsuba::ref<mitsuba::Object>>(prop.name()), false);
+                break;
+              default:
+                break;
+            }
+          }
+        }
+      }
+    } else if (auto sampled_ds = HdSampledDataSource::Cast(child_ds)) {
+      VtValue val = sampled_ds->GetValue(0.0f);
+      if (!val.IsEmpty()) {
+        SetMitsubaPropertyFromValue(props, name_str, val);
+      }
+    }
+  }
+
+  return props;
+}
+
+mitsuba::ref<mitsuba::Object> BuildPluginFromProperties(
+    const mitsuba::Properties& props,
+    std::string_view variant,
+    mitsuba::ObjectType expected_type) {
+  if (props.plugin_name().empty()) {
+    return nullptr;
+  }
+  mitsuba::ObjectType obj_type = expected_type;
+  if (obj_type == mitsuba::ObjectType::Unknown) {
+    obj_type = mitsuba::PluginManager::instance()->plugin_type(props.plugin_name());
+  }
+
+  mitsuba::ref<mitsuba::Object> obj =
+      mitsuba::PluginManager::instance()->create_object(props, variant, obj_type);
+  if (obj) {
+    std::vector<mitsuba::ref<mitsuba::Object>> expanded = obj->expand();
+    if (!expanded.empty()) {
+      obj = expanded[0];
+    }
+  }
+  return obj;
+}
+
+mitsuba::ref<mitsuba::Object> BuildPluginFromContainer(
+    const HdContainerDataSourceHandle& container,
+    std::string_view variant,
+    std::string_view default_plugin_type,
+    mitsuba::ObjectType expected_type) {
+  if (!container) return nullptr;
+  mitsuba::Properties props =
+      ContainerToMitsubaProperties(container, default_plugin_type, variant);
+  return BuildPluginFromProperties(props, variant, expected_type);
 }
 
 std::optional<mitsuba::Properties> ExtractTextureProperties(
@@ -233,6 +470,22 @@ std::optional<mitsuba::Properties> ExtractTextureProperties(
       source_color_space = source_color_space_it->second.Get<TfToken>();
     }
     bool is_raw = UseRawBitmap(source_color_space, input_name);
+    // The Hydra 2.0 material network schema carries the *resolved* color
+    // space per parameter (UsdImaging folds the UsdUVTexture
+    // sourceColorSpace input into the file parameter's colorSpace field; the
+    // parameter itself no longer appears in scene-index networks, so the
+    // legacy read above only ever sees "auto" there). An explicit "raw" or
+    // "sRGB" from the schema overrides the input-name heuristic.
+    auto color_space_it = parameters.find(TfToken("colorSpace:file"));
+    if (color_space_it != parameters.end() &&
+        color_space_it->second.IsHolding<TfToken>()) {
+      const TfToken color_space = color_space_it->second.Get<TfToken>();
+      if (color_space == TfToken("raw")) {
+        is_raw = true;
+      } else if (color_space == TfToken("sRGB")) {
+        is_raw = false;
+      }
+    }
     props.set("raw", is_raw);
     auto wrap_s_it = parameters.find(TfToken("wrapS"));
     if (wrap_s_it != parameters.end() &&
@@ -602,9 +855,274 @@ PrimTranslator<Float, Spectrum>::BuildMaterial(
   return res;
 }
 
-MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
-    mitsuba::Object* /*bsdf*/, const MaterialSpec& /*spec*/,
-    const TextureCache& /*texture_cache*/) {}
+namespace {
+
+// Records one object's *direct* traversal entries: its parameter names (used
+// as the `parameters_changed` keys — several Mitsuba plugins only re-derive
+// state for parameters named in the keys list) and its child objects.
+class DirectTraversalEntries final : public mitsuba::TraversalCallback {
+ public:
+  std::vector<std::string> names;
+  std::vector<mitsuba::Object*> children;
+
+ protected:
+  void put_value(std::string_view name, void* /*value*/, uint32_t /*flags*/,
+                 const std::type_info& /*type*/) override {
+    names.emplace_back(name);
+  }
+  void put_object(std::string_view name, mitsuba::Object* value,
+                  uint32_t /*flags*/) override {
+    names.emplace_back(name);
+    if (value != nullptr) {
+      children.push_back(value);
+    }
+  }
+};
+
+// Collects the object hierarchy below (and including) a root together with
+// each object's direct parameter names, so that parameters_changed() can be
+// invoked bottom-up with full key lists after an in-place update.
+class ObjectHierarchyCollector {
+ public:
+  explicit ObjectHierarchyCollector(mitsuba::Object* root) {
+    Visit(root);
+  }
+
+  std::vector<std::pair<mitsuba::Object*, std::vector<std::string>>> objects;
+
+ private:
+  void Visit(mitsuba::Object* object) {
+    if (object == nullptr || !seen_.insert(object).second) {
+      return;
+    }
+    DirectTraversalEntries entries;
+    object->traverse(&entries);
+    objects.emplace_back(object, std::move(entries.names));
+    for (mitsuba::Object* child : entries.children) {
+      Visit(child);
+    }
+  }
+
+  absl::flat_hash_set<void*> seen_;
+};
+
+// Assigns *src to *dst if the traversal entry holds a T. Uses typed
+// assignment (never memcpy): Dr.Jit array types manage reference counts.
+template <typename T>
+bool TryCopyTraversalValue(const std::type_info& type, void* dst, void* src) {
+  if (type == typeid(T) ||
+      std::string_view(type.name()) == typeid(T).name()) {
+    *static_cast<T*>(dst) = *static_cast<T*>(src);
+    return true;
+  }
+  return false;
+}
+
+template <typename... Ts>
+bool TryCopyTraversalValueAny(const std::type_info& type, void* dst,
+                              void* src) {
+  return (TryCopyTraversalValue<Ts>(type, dst, src) || ...);
+}
+
+template <typename T>
+bool TraversalTypeIs(const std::type_info& type) {
+  return type == typeid(T) ||
+         std::string_view(type.name()) == typeid(T).name();
+}
+
+}  // namespace
+
+
+namespace {
+
+// Notifies an object tree children-first, passing each object's full
+// parameter-name list (several plugins skip recomputation for unnamed keys).
+void NotifyParametersChangedChildrenFirst(mitsuba::Object* root) {
+  ObjectHierarchyCollector hierarchy(root);
+  for (auto it = hierarchy.objects.rbegin(); it != hierarchy.objects.rend();
+       ++it) {
+    it->first->parameters_changed(it->second);
+  }
+}
+
+}  // namespace
+
+MI_VARIANT
+typename PrimTranslator<Float, Spectrum>::MaterialParamSlots
+PrimTranslator<Float, Spectrum>::ResolveMaterialParamSlots(
+    mitsuba::Object* bsdf) {
+  MaterialParamSlots result;
+  TraversalCallback cb;
+  bsdf->traverse(&cb);
+  result.slots.reserve(cb.data.size());
+  for (const auto& [name, entry] : cb.data) {
+    result.slots.emplace_back(name, entry.first, &entry.second);
+  }
+  ObjectHierarchyCollector hierarchy(bsdf);
+  result.notify_order.assign(hierarchy.objects.rbegin(),
+                             hierarchy.objects.rend());
+  return result;
+}
+
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::ApplyMaterialParamValues(
+    const MaterialParamSlots& resolved,
+    const std::vector<std::pair<std::string, VtValue>>& changes) {
+  using Color3f = mitsuba::Color<Float, 3>;
+  using ScalarColor3f = mitsuba::Color<float, 3>;
+
+  struct Write {
+    void* dst;
+    const std::type_info* type;
+    VtValue value;
+  };
+  std::vector<Write> writes;
+  writes.reserve(changes.size());
+
+  for (const auto& [suffix, value] : changes) {
+    void* dst = nullptr;
+    const std::type_info* type = nullptr;
+    for (const auto& [name, ptr, type_info] : resolved.slots) {
+      if (name.size() >= suffix.size() &&
+          name.compare(name.size() - suffix.size(), suffix.size(), suffix) ==
+              0) {
+        if (dst != nullptr) {
+          return false;  // Ambiguous: more than one slot matches.
+        }
+        dst = ptr;
+        type = type_info;
+      }
+    }
+    if (dst == nullptr) {
+      return false;  // No slot for this parameter on the live material.
+    }
+    writes.push_back({dst, type, value});
+  }
+
+  // Validate all conversions before writing anything.
+  for (const Write& w : writes) {
+    const bool color_slot = (*w.type == typeid(Color3f)) ||
+                            (*w.type == typeid(ScalarColor3f));
+    const bool float_slot = (*w.type == typeid(Float)) ||
+                            (*w.type == typeid(float)) ||
+                            (*w.type == typeid(double));
+    const VtValue& value = w.value;
+    if (color_slot &&
+        !(value.IsHolding<GfVec3f>() || value.IsHolding<GfVec4f>())) {
+      return false;
+    }
+    if (float_slot &&
+        !(value.IsHolding<float>() || value.IsHolding<double>())) {
+      return false;
+    }
+    if (!color_slot && !float_slot) {
+      return false;
+    }
+  }
+
+  for (const Write& w : writes) {
+    const VtValue& value = w.value;
+    if (value.IsHolding<GfVec3f>() || value.IsHolding<GfVec4f>()) {
+      GfVec3f c = value.IsHolding<GfVec3f>()
+                      ? value.UncheckedGet<GfVec3f>()
+                      : GfVec3f(value.UncheckedGet<GfVec4f>()[0],
+                                value.UncheckedGet<GfVec4f>()[1],
+                                value.UncheckedGet<GfVec4f>()[2]);
+      if (*w.type == typeid(Color3f)) {
+        *static_cast<Color3f*>(w.dst) = Color3f(c[0], c[1], c[2]);
+      } else {
+        *static_cast<ScalarColor3f*>(w.dst) = ScalarColor3f(c[0], c[1], c[2]);
+      }
+    } else {
+      const float v = value.IsHolding<float>()
+                          ? value.UncheckedGet<float>()
+                          : static_cast<float>(value.UncheckedGet<double>());
+      if (*w.type == typeid(Float)) {
+        *static_cast<Float*>(w.dst) = Float(v);
+      } else if (*w.type == typeid(float)) {
+        *static_cast<float*>(w.dst) = v;
+      } else {
+        *static_cast<double*>(w.dst) = v;
+      }
+    }
+  }
+
+  for (const auto& [object, keys] : resolved.notify_order) {
+    object->parameters_changed(keys);
+  }
+  return true;
+}
+
+MI_VARIANT bool PrimTranslator<Float, Spectrum>::UpdateMaterialInPlace(
+    mitsuba::Object* bsdf, const MaterialSpec& spec,
+    const TextureCache& texture_cache) {
+  // The material sprim only requests an in-place update when the network
+  // structure is unchanged (same nodes, connections, terminals and
+  // string/file parameters), so a freshly translated twin has an identical
+  // traversal layout. Copy every parameter from the twin onto the live
+  // object; anything this cannot faithfully copy makes the caller fall back
+  // to a full rebuild, so an in-place update is never silently wrong.
+  TranslatedMaterial twin = BuildMaterial(spec, texture_cache);
+  if (!twin.bsdf || twin.bsdf.get() == bsdf) {
+    return false;
+  }
+
+  TraversalCallback dst_cb;
+  bsdf->traverse(&dst_cb);
+  TraversalCallback src_cb;
+  twin.bsdf->traverse(&src_cb);
+  if (src_cb.data.size() != dst_cb.data.size()) {
+    return false;
+  }
+
+  using TensorXf = dr::Tensor<mitsuba::DynamicBuffer<Float>>;
+  using Color3f = mitsuba::Color<Float, 3>;
+  using ScalarColor3f = mitsuba::Color<float, 3>;
+  using AffineTransform4f = mitsuba::Transform<mitsuba::Point<Float, 4>, true>;
+  using ScalarAffineTransform3f =
+      mitsuba::Transform<mitsuba::Point<float, 3>, true>;
+
+  for (const auto& [name, src_entry] : src_cb.data) {
+    auto dst_it = dst_cb.data.find(name);
+    if (dst_it == dst_cb.data.end()) {
+      return false;
+    }
+    const std::type_info& type = src_entry.second;
+    const std::type_info& dst_type = dst_it->second.second;
+    if (!(type == dst_type ||
+          std::string_view(type.name()) == dst_type.name())) {
+      return false;
+    }
+    void* src = src_entry.first;
+    void* dst = dst_it->second.first;
+    // Bitmap tensors are derived from the texture file, which the structural
+    // gate keeps unchanged for in-place updates — skipping them is safe (and
+    // avoids copying whole images).
+    if (TraversalTypeIs<TensorXf>(type)) {
+      continue;
+    }
+    const bool copied = TryCopyTraversalValueAny<
+        float, double, bool, int32_t, uint32_t, int64_t, uint64_t, Float,
+        Color3f, ScalarColor3f, mitsuba::Vector<Float, 3>,
+        mitsuba::Point<Float, 3>, ScalarVector3f, mitsuba::Point<float, 3>,
+        AffineTransform4f, ScalarAffineTransform4f, ScalarAffineTransform3f,
+        mitsuba::Transform<mitsuba::Point<Float, 3>, true>>(type, dst, src);
+    if (!copied) {
+      TF_DEBUG(HDMITSUBA_SYNC)
+          .Msg("UpdateMaterialInPlace(%s): unsupported parameter type %s for "
+               "'%s' — falling back to rebuild\n",
+               spec.id.GetText(), type.name(), name.c_str());
+      return false;
+    }
+  }
+
+  // Notify children before parents, mirroring how Mitsuba's own parameter
+  // update flow propagates changes. Each object gets its full parameter name
+  // list as the keys: several plugins (e.g. the principled BSDF's
+  // eta/specular derivation) only re-derive state for named keys and would
+  // skip recomputation entirely on an empty list.
+  NotifyParametersChangedChildrenFirst(bsdf);
+  return true;
+}
 
 MI_VARIANT typename PrimTranslator<Float, Spectrum>::TranslatedLight
 PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {

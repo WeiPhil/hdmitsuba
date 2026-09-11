@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "hdmitsuba/prim_translation.h"
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/sprim.h>
 #include <pxr/imaging/hd/types.h>
@@ -33,6 +34,13 @@ class HdMitsubaMaterial final : public HdMaterial {
   HdDirtyBits GetInitialDirtyBitsMask() const override;
 
   void Finalize(HdRenderParam* renderParam) override;
+
+ private:
+  // The last network synced to the scene manager, used to detect edits that
+  // only change parameter values (same nodes/connections/terminals): those
+  // update the existing Mitsuba BSDF in place instead of rebuilding it,
+  // which keeps frozen kernels valid during interactive tweaks.
+  MaterialTranslationState translation_state_;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

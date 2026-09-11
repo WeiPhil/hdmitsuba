@@ -12,3 +12,5 @@ inst/
 build_ci/
 scratch/
 run_tests.py
+pytest.log
+pytest.log

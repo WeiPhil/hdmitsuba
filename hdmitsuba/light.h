@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "hdmitsuba/prim_translation.h"
 #include <string>
 
 #include <pxr/base/tf/token.h>
@@ -43,10 +44,7 @@ class HdMitsubaLight final : public HdLight {
   void RemoveFromScene(SceneManager* scene);
 
   TfToken type_id_;
-  bool is_instantiated_ = false;
-  bool treat_as_point_ = false;
-  float shaping_cone_angle_ = 0.0f;
-  std::string texture_file_path_;
+  LightTranslationState translation_state_;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

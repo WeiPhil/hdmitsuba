@@ -27,7 +27,6 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/bprim.h>
-#include <pxr/imaging/hd/extComputation.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
@@ -73,7 +72,7 @@ const TfTokenVector& HdMitsubaRenderDelegate::GetSupportedSprimTypes() const {
       HdPrimTypeTokens->camera,    HdPrimTypeTokens->sphereLight,
       HdPrimTypeTokens->domeLight, HdPrimTypeTokens->distantLight,
       HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight,
-      HdPrimTypeTokens->material,  HdPrimTypeTokens->extComputation,
+      HdPrimTypeTokens->material,
   };
   return *kSupportedSprimTypes;
 }
@@ -159,8 +158,6 @@ HdSprim* HdMitsubaRenderDelegate::CreateSprim(const TfToken& typeId,
     return new HdMitsubaLight(sprimId, typeId);
   } else if (typeId == HdPrimTypeTokens->material) {
     return new HdMitsubaMaterial(sprimId);
-  } else if (typeId == HdPrimTypeTokens->extComputation) {
-    return new HdExtComputation(sprimId);
   }
   return nullptr;
 }
@@ -180,6 +177,15 @@ HdBprim* HdMitsubaRenderDelegate::CreateBprim(const TfToken& typeId,
 }
 
 void HdMitsubaRenderDelegate::DestroyBprim(HdBprim* bPrim) { delete bPrim; }
+
+void HdMitsubaRenderDelegate::SetTerminalSceneIndex(
+    const HdSceneIndexBaseRefPtr& terminalSceneIndex) {
+  scene_index_backend_.Attach(terminalSceneIndex);
+}
+
+void HdMitsubaRenderDelegate::Update() {
+  scene_index_backend_.ProcessUpdates(scene_impl_.get());
+}
 
 HdRenderPassSharedPtr HdMitsubaRenderDelegate::CreateRenderPass(
     HdRenderIndex* index, const HdRprimCollection& collection) {
@@ -218,25 +224,7 @@ HdBprim* HdMitsubaRenderDelegate::CreateFallbackBprim(const TfToken& typeId) {
   return nullptr;
 }
 
-void HdMitsubaRenderDelegate::MarkAllPrimsDirty(HdChangeTracker* tracker) {
-  tracker->MarkAllRprimsDirty(HdChangeTracker::AllDirty);
-  if (render_index_) {
-    for (const TfToken& sprim_type : GetSupportedSprimTypes()) {
-      for (const SdfPath& id : render_index_->GetSprimSubtree(
-               sprim_type, SdfPath::AbsoluteRootPath())) {
-        tracker->MarkSprimDirty(id, HdChangeTracker::AllDirty);
-      }
-    }
-    for (const TfToken& bprim_type : GetSupportedBprimTypes()) {
-      for (const SdfPath& id : render_index_->GetBprimSubtree(
-               bprim_type, SdfPath::AbsoluteRootPath())) {
-        tracker->MarkBprimDirty(id, HdChangeTracker::AllDirty);
-      }
-    }
-  }
-}
-
-void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
+void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {
   std::string target_variant =
       GetRenderSetting(HdMitsubaRenderSettingsTokens->variant)
           .GetWithDefault<std::string>(HdMitsubaConfig::GetInstance().variant);
@@ -246,11 +234,17 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
             "Mitsuba variant changed from '%s' to '%s'. Recreating "
             "SceneManager.\n",
             current_variant_.c_str(), target_variant.c_str());
-    scene_impl_ = std::unique_ptr<SceneManager>(
+    // The cached prim specs are variant-independent: seed the new scene
+    // manager from them and rebuild the Mitsuba scene directly. No Hydra
+    // prim is dirtied — a render delegate cannot re-dirty scene-index-fed
+    // prims through the change tracker's legacy API (it raises "requires
+    // emulation" coding errors and no-ops in Hydra 2.0 hosts like usdview).
+    std::unique_ptr<SceneManager> new_manager(
         SceneManager::CreateSceneManager(target_variant));
+    new_manager->SeedSpecsFrom(*scene_impl_);
+    scene_impl_ = std::move(new_manager);
     render_param_->SetScene(scene_impl_.get());
     current_variant_ = target_variant;
-    MarkAllPrimsDirty(tracker);
   }
 
   VtDictionary namespaced_settings;
@@ -273,6 +267,13 @@ void HdMitsubaRenderDelegate::CommitResources(HdChangeTracker* tracker) {
 }
 
 TfTokenVector HdMitsubaRenderDelegate::GetMaterialRenderContexts() const {
+  return {TfToken("mitsuba")};
+}
+
+TfTokenVector HdMitsubaRenderDelegate::GetRenderSettingsNamespaces() const {
+  // Hydra 2.0: HdsiRenderSettingsFilteringSceneIndex uses these prefixes to
+  // decide which namespaced settings authored on RenderSettings prims are
+  // forwarded to the renderSettings bprim (HdMitsubaRenderSettings).
   return {TfToken("mitsuba")};
 }
 

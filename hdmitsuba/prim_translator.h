@@ -26,6 +26,7 @@
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/render/fwd.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/pxr.h>
 
@@ -54,6 +55,43 @@ void SetMitsubaPropertyFromValue(mitsuba::Properties& props,
                                  std::string_view name, const pxr::VtValue& val,
                                  bool invert_float = false);
 
+// Translates a hierarchical HdContainerDataSource into mitsuba::Properties.
+// Recursively traverses child containers and populates nested properties.
+// If variant is provided and a child container defines a plugin type, the child
+// plugin object is instantiated and attached.
+mitsuba::Properties ContainerToMitsubaProperties(
+    const HdContainerDataSourceHandle& container,
+    std::string_view default_plugin_type = "",
+    std::string_view variant = "");
+
+// Instantiates a Mitsuba plugin Object from a Properties instance.
+mitsuba::ref<mitsuba::Object> BuildPluginFromProperties(
+    const mitsuba::Properties& props,
+    std::string_view variant,
+    mitsuba::ObjectType expected_type = mitsuba::ObjectType::Unknown);
+
+// Recursively translates a hierarchical HdContainerDataSource into an instantiated Mitsuba plugin Object.
+mitsuba::ref<mitsuba::Object> BuildPluginFromContainer(
+    const HdContainerDataSourceHandle& container,
+    std::string_view variant,
+    std::string_view default_plugin_type = "",
+    mitsuba::ObjectType expected_type = mitsuba::ObjectType::Unknown);
+
+// Template convenience helper for typed objects (Integrator, BSDF, Texture, Sensor, etc.)
+template <typename T>
+mitsuba::ref<T> BuildPluginFromContainer(
+    const HdContainerDataSourceHandle& container,
+    std::string_view default_plugin_type = "") {
+  return mitsuba::ref<T>(static_cast<T*>(
+      BuildPluginFromContainer(container, T::Variant, default_plugin_type, T::Type).get()));
+}
+
+// Unflattens a container with delimited keys (e.g. "mitsuba:integrator:max_depth")
+// into a truly nested HdContainerDataSource hierarchy.
+HdContainerDataSourceHandle UnflattenContainer(
+    const HdContainerDataSourceHandle& container,
+    char delimiter = ':');
+
 std::optional<mitsuba::Properties> ExtractTextureProperties(
     const std::map<TfToken, pxr::VtValue>& parameters,
     const TfToken& nodeTypeId, const TfToken& input_name);
@@ -69,7 +107,38 @@ class PrimTranslator {
 
   static TranslatedMaterial BuildMaterial(const MaterialSpec& spec,
                                           const TextureCache& texture_cache);
-  static void UpdateMaterialInPlace(mitsuba::Object* bsdf,
+  // Applies a parameter-values-only material edit to the existing Mitsuba
+  // BSDF via its traversal interface (building a translated twin as the
+  // value source). Returns false when the update cannot be applied
+  // faithfully; the caller must then rebuild the material.
+  // Resolved write slots and notification order for targeted material
+  // parameter updates. Valid while the material's object structure is
+  // unchanged (the same lifetime the in-place update guards guarantee);
+  // rebuilds must discard it.
+  struct MaterialParamSlots {
+    // Traversal-name suffix -> (destination, type).
+    std::vector<std::tuple<std::string, void*, const std::type_info*>> slots;
+    // Children-first notification order with full parameter-name lists.
+    std::vector<std::pair<mitsuba::Object*, std::vector<std::string>>>
+        notify_order;
+  };
+
+  // Walks the live material once and resolves everything ApplyParamValues
+  // needs. Cache the result per material; invalidate on rebuild.
+  static MaterialParamSlots ResolveMaterialParamSlots(mitsuba::Object* bsdf);
+
+  // Writes individual parameter values onto the live material without
+  // building a twin: each entry maps a Mitsuba traversal-name suffix (e.g.
+  // "base_color.value") to its new value. All slots are resolved before any
+  // write; returns false (writing nothing) if any slot is missing,
+  // ambiguous, or of an unsupported type — the caller then falls back to a
+  // full rebuild path. On success the object tree is notified
+  // children-first with full parameter-name lists.
+  static bool ApplyMaterialParamValues(
+      const MaterialParamSlots& slots,
+      const std::vector<std::pair<std::string, VtValue>>& changes);
+
+  static bool UpdateMaterialInPlace(mitsuba::Object* bsdf,
                                     const MaterialSpec& spec,
                                     const TextureCache& texture_cache);
   static mitsuba::ref<mitsuba::Object> LoadTexture(
