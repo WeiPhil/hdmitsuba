@@ -110,7 +110,7 @@ def assert_hydra_equal_to_offline(
     spp: int = 128,
     atol: float = 0.05,
     rtol: float = 1e-3,
-    engine: Any | None = None,
+    engine: Any = None,
     subdivision_level: int = 1,
     refine_level_fallback: int | None = None,
     time: Usd.TimeCode = Usd.TimeCode.Default(),
