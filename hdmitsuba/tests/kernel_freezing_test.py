@@ -163,3 +163,29 @@ def test_kernel_freezing_instancing_fallback():
   instancer.CreatePositionsAttr().Set([(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)])
   # Render (should run safely on the fallback path without any crashes)
   assert engine.render()['color'] is not None
+
+
+def test_kernel_freezing_envmap_intensity_update():
+  # Verify that textured DomeLight (envmap) scale/intensity updates work across
+  # frozen kernel replays (i.e. scale is opaque rather than baked as a constant).
+  stage = Usd.Stage.Open(f'{test_helpers.TEST_ASSETS_PATH}/lights/envmap.usda')
+  test_helpers.create_render_settings(stage, resolution=(128, 128))
+  settings_prim = stage.GetPrimAtPath('/Render/PrimarySettings')
+  settings_prim.CreateAttribute(
+      'mitsuba:variant', Sdf.ValueTypeNames.String
+  ).Set(mi.variant())
+  settings_prim.CreateAttribute(
+      'mitsuba:use_kernel_freezing', Sdf.ValueTypeNames.Bool
+  ).Set(True)
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(hydra_delegate_id='HdMitsubaRendererPlugin')
+
+  _ = engine.render()['color']  # Frame 1: warm-up
+  img_recorded = engine.render()['color'][..., :3]  # Frame 2: record frozen kernel
+
+  env_light = UsdLux.DomeLight.Get(stage, '/root/env_light')
+  env_light.GetIntensityAttr().Set(3.0)
+
+  img_replayed = engine.render()['color'][..., :3]  # Frame 3: replay frozen kernel
+  np.testing.assert_allclose(img_replayed, img_recorded * 2.0, atol=1e-2, rtol=1e-2)

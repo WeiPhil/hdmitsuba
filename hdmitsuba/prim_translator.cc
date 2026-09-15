@@ -622,6 +622,13 @@ PrimTranslator<Float, Spectrum>::BuildLight(const LightSpec& spec) {
     res.emitter = mitsuba::PluginManager::instance()
                       ->create_object<mitsuba::Emitter<Float, Spectrum>>(props);
     res.emitter->set_id(id_str);
+    if (plugin_name == "envmap") {
+      TraversalCallback cb;
+      res.emitter->traverse(&cb);
+      float scale =
+          (spec.emission[0] + spec.emission[1] + spec.emission[2]) / 3.f;
+      cb.set<Float>("scale", dr::opaque<Float>(scale));
+    }
   }
   return res;
 }
@@ -781,7 +788,9 @@ MI_VARIANT void PrimTranslator<Float, Spectrum>::UpdateLightInPlace(
         cb.set<AffineTransform4f>("to_world",
                                   AffineTransform4f(to_world.matrix));
         float scale = (color[0] + color[1] + color[2]) / 3.f;
-        cb.set<Float>("scale", scale);
+        cb.set<Float>("scale", dr::opaque<Float>(scale));
+        emitter->parameters_changed({"scale", "to_world"});
+        return;
       } else {
         cb.set<Color3f>("radiance.value",
                         Color3f(color[0], color[1], color[2]));
