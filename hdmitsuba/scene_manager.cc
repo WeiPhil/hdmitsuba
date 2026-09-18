@@ -659,6 +659,12 @@ class SceneModel final : public SceneManager {
       spec.needs_rebuild = true;
     }
     if (prev_it != camera_specs_.end() && !spec.needs_rebuild) {
+      if (spec.near_clip != prev_it->second.near_clip ||
+          spec.far_clip != prev_it->second.far_clip) {
+        if constexpr (dr::is_jit_v<Float>) {
+          if (frozen_render_) frozen_render_->Clear();
+        }
+      }
       spec.dirty_bits |= prev_it->second.dirty_bits;
     }
     camera_specs_[spec.id] = std::move(spec);
@@ -835,6 +841,7 @@ class SceneModel final : public SceneManager {
     }
     pass_state.aov_integrator_keys = absl::StrJoin(aov_strings, ",");
     pass_state.aov_integrator = nullptr;
+    reset_progressive_ = true;
     absl::MutexLock lock(aov_states_mutex_);
     pass_aov_states_[render_pass] = std::move(pass_state);
   }
@@ -890,6 +897,16 @@ class SceneModel final : public SceneManager {
       }
     }
 
+    if (sensor != last_sensor_) {
+      last_sensor_ = sensor;
+      reset_progressive_ = true;
+      if constexpr (dr::is_jit_v<Float>) {
+        if (frozen_render_) {
+          frozen_render_->Clear();
+        }
+      }
+    }
+
     Film* film = sensor->film();
     auto film_size = film->size();
     bool film_changed = false;
@@ -913,6 +930,7 @@ class SceneModel final : public SceneManager {
 
     if (film_changed) {
       sensor->parameters_changed();
+      reset_progressive_ = true;
       if (frozen_render_) frozen_render_->Clear(); // Invalidate cache on resize
     }
 
@@ -933,38 +951,49 @@ class SceneModel final : public SceneManager {
       render_integrator = pass_state.aov_integrator.get();
     }
 
-    if (reset_progressive_) {
+    if (reset_progressive_ || !progressive_rendering_) {
       accum_buffer_ = TensorXf();
       current_progressive_sample_ = 0;
       reset_progressive_ = false;
     }
-    int samples_to_render = sample_count_;
-    if (progressive_rendering_) {
-      samples_to_render =
-          (current_progressive_sample_ < static_cast<int>(sample_count_)) ? 1
-                                                                          : 0;
-    }
+
     TensorXf display_result;
+    int step_size = (interactive_samples_per_pass_ > 0)
+                        ? interactive_samples_per_pass_
+                        : 1;
+    int samples_to_render = static_cast<int>(sample_count_);
+    if (progressive_rendering_) {
+      int remaining =
+          static_cast<int>(sample_count_) - current_progressive_sample_;
+      samples_to_render = std::max(0, std::min(step_size, remaining));
+    }
+
     if (samples_to_render > 0) {
       // 3. Render a chunk of samples
       TensorXf result;
-      uint32_t sample_index = progressive_rendering_
-          ? static_cast<uint32_t>(current_progressive_sample_)
-          : 0;
+      uint32_t sample_index =
+          progressive_rendering_
+              ? static_cast<uint32_t>(current_progressive_sample_)
+              : 0;
       bool run_frozen = false;
       if constexpr (dr::is_jit_v<Float>) {
-        run_frozen = !has_instancing_ && frozen_render_;
+        // Only replay the frozen kernel for full-size passes; a smaller tail
+        // pass would otherwise force a re-record on every convergence cycle.
+        run_frozen = !has_instancing_ && frozen_render_ &&
+                     (!progressive_rendering_ || samples_to_render == step_size);
       }
       if (run_frozen) {
-        result = frozen_render_->Render(scene_.get(), sensor, render_integrator,
-                                        sample_index, static_cast<uint32_t>(samples_to_render));
+        result = frozen_render_->Render(
+            scene_.get(), sensor, render_integrator, sample_index,
+            static_cast<uint32_t>(samples_to_render));
       } else {
         result = render_integrator->render(
             scene_.get(), sensor, sample_index,
-            static_cast<uint32_t>(samples_to_render), true, true);
+            static_cast<uint32_t>(samples_to_render), /*develop=*/true,
+            /*evaluate=*/true);
         if constexpr (dr::is_jit_v<Float>) {
           dr::sync_thread();
-          if (frozen_render_) frozen_render_->Clear(); // Clear cache if freezing is disabled
+          if (has_instancing_ && frozen_render_) frozen_render_->Clear();
         }
       }
       size_t expected_width = crop_window.has_value() ? crop_window->GetWidth() : buffer_width;
@@ -980,10 +1009,20 @@ class SceneModel final : public SceneManager {
       // 4. Accumulate and average
       current_progressive_sample_ += samples_to_render;
       if (progressive_rendering_) {
-        if (current_progressive_sample_ == samples_to_render) {
-          accum_buffer_ = result;
+        // The integrator returns the mean over the samples it rendered; weight
+        // by the sample count to accumulate a running sum, then normalize for
+        // display.
+        TensorXf weighted(
+            result.array() * static_cast<float>(samples_to_render),
+            result.shape());
+        if (current_progressive_sample_ == samples_to_render ||
+            accum_buffer_.empty()) {
+          accum_buffer_ = std::move(weighted);
         } else {
-          accum_buffer_.array() += result.array();
+          accum_buffer_.array() += weighted.array();
+        }
+        if constexpr (dr::is_jit_v<Float>) {
+          dr::eval(accum_buffer_);  // keep the JIT graph bounded across passes
         }
         // Average for display
         display_result =
@@ -1043,40 +1082,65 @@ class SceneModel final : public SceneManager {
   }
 
   bool IsConverged() const override {
-    if (!progressive_rendering_) {
-      return true;
-    }
-    return current_progressive_sample_ >= static_cast<int>(sample_count_);
+    return !progressive_rendering_ ||
+           (current_progressive_sample_ >= static_cast<int>(sample_count_));
+  }
+
+  int GetCurrentSampleCount() const override {
+    return progressive_rendering_ ? current_progressive_sample_
+                                  : static_cast<int>(sample_count_);
+  }
+
+  int GetTargetSampleCount() const override {
+    return static_cast<int>(sample_count_);
   }
 
   void UpdateNamespacedSettings(
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
+    bool rebuild_integrator = !integrator_;
+    {
+      auto it =
+          namespaced_settings.find("mitsuba:interactive_samples_per_pass");
+      if (it != namespaced_settings.end()) {
+        int new_samples_per_pass = it->second.Get<int>();
+        if (new_samples_per_pass != interactive_samples_per_pass_) {
+          interactive_samples_per_pass_ = new_samples_per_pass;
+          reset_progressive_ = true;
+        }
+      }
+    }
     {
       auto it = namespaced_settings.find("mitsuba:integrator:type");
       if (it != namespaced_settings.end()) {
         std::string integrator_type = it->second.Get<std::string>();
-        if (integrator_type != integrator_type_ || !integrator_) {
-          TF_DEBUG(HDMITSUBA_LIFECYCLE)
-              .Msg("Creating integrator, type: %s (was: %s)\n",
-                   integrator_type.c_str(), integrator_type_.c_str());
-          Properties integrator_props(integrator_type);
-          integrator_ = PluginManager::instance()->create_object<Integrator>(
-              integrator_props);
+        if (integrator_type != integrator_type_) {
           integrator_type_ = integrator_type;
-          for (auto& [_, pass_state] : pass_aov_states_) {
-            pass_state.aov_integrator = nullptr;
-          }
-          reset_progressive_ = true;
+          rebuild_integrator = true;
         }
       }
+    }
+    if (rebuild_integrator) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Creating integrator, type: %s\n", integrator_type_.c_str());
+      Properties integrator_props(integrator_type_);
+      integrator_ = PluginManager::instance()->create_object<Integrator>(
+          integrator_props);
+      for (auto& [_, pass_state] : pass_aov_states_) {
+        pass_state.aov_integrator = nullptr;
+      }
+      reset_progressive_ = true;
     }
 
     {
       auto it = namespaced_settings.find("mitsuba:sample_count");
       if (it != namespaced_settings.end()) {
-        sample_count_ = it->second.Get<int>();
+        int new_sample_count = it->second.Get<int>();
+        if (static_cast<size_t>(new_sample_count) != sample_count_) {
+          sample_count_ = new_sample_count;
+          reset_progressive_ = true;
+        }
       }
     }
     {
@@ -1765,6 +1829,7 @@ class SceneModel final : public SceneManager {
   std::string integrator_type_ = "path";
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
+  int interactive_samples_per_pass_ = 0;  // <= 0 means 1; see Render()
   bool has_instancing_ = false;
 
   // Progressive rendering state
@@ -1772,6 +1837,7 @@ class SceneModel final : public SceneManager {
   int current_progressive_sample_ = 0;
   TensorXf accum_buffer_;
   bool reset_progressive_ = true;
+  const Sensor* last_sensor_ = nullptr;  // identity-only comparison
 
   absl::Mutex state_mutex_;
   absl::Mutex aov_states_mutex_;

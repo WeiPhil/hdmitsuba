@@ -25,6 +25,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <pxr/base/gf/vec2i.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/base/vt/dictionary.h>
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/imaging/hd/engine.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
@@ -91,8 +92,21 @@ class RenderEngine {
                  std::optional<int> refine_level_fallback,
                  const pxr::HdRenderSettingsMap& overrides = {});
 
+  // Renders the current frame. When `max_passes` <= 0 (the default), the render
+  // loops until the frame has fully converged (batch behavior). When positive,
+  // the loop runs at most `max_passes` engine passes and returns the current,
+  // possibly-unconverged buffers, enabling progressive (interactive) rendering.
   absl::flat_hash_map<pxr::TfToken, OutputBuffer, pxr::TfToken::HashFunctor>
-  Render(pxr::UsdTimeCode time_code);
+  Render(pxr::UsdTimeCode time_code, int max_passes = 0);
+
+  // Returns whether the most recent Render has fully converged (i.e. reached
+  // the target sample count). Useful for progressive rendering to know when to
+  // stop requesting further passes.
+  bool IsConverged() const;
+
+  // Returns render stats from the underlying Hydra delegate (e.g. completed and
+  // total samples).
+  pxr::VtDictionary GetRenderStats() const;
 
  private:
   void UpdateAovsAndBuffers();

@@ -173,3 +173,126 @@ def test_invalid_camera_throws():
     pytest.skip("No renderers registered")
   with pytest.raises(RuntimeError, match="No camera found"):
     engine.configure(hydra_delegate_id=renderers[0])
+
+
+def test_progressive_rendering_accumulates():
+  """Interactive mode refines progressively across bounded-pass renders.
+
+  With `enableInteractive=True`, a bounded `render(max_passes=1)` call
+  advances the render by a limited amount rather than converging in one shot,
+  and repeated calls accumulate samples into the same buffer. As the running
+  estimate settles, frame-to-frame change shrinks. This exercises the same
+  progressive path that usdview drives; if interactive mode were ignored
+  (one-shot batch), the frame-to-frame deltas would not decrease.
+  """
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  stage = _create_stage()
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      overrides={'enableInteractive': True},
+  )
+
+  # Early single passes: the estimate is still changing rapidly.
+  first = engine.render(max_passes=1)['color'].astype(np.float64)
+  second = engine.render(max_passes=1)['color'].astype(np.float64)
+  early_delta = np.mean(np.abs(second - first))
+
+  # Accumulate many more passes so the estimate settles.
+  for _ in range(64):
+    engine.render(max_passes=1)
+  late_a = engine.render(max_passes=1)['color'].astype(np.float64)
+  late_b = engine.render(max_passes=1)['color'].astype(np.float64)
+  late_delta = np.mean(np.abs(late_b - late_a))
+
+  # Samples are accumulating: there is real progression early on, and later
+  # frames change much less than early ones as the estimate converges.
+  assert early_delta > 0.0
+  assert late_delta < early_delta
+
+
+def test_interactive_samples_per_pass_updates_dynamically():
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  stage = _create_stage()
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      overrides={
+          'enableInteractive': True,
+          'mitsuba:sample_count': 8,
+          'mitsuba:interactive_samples_per_pass': 1,
+          'mitsuba:use_kernel_freezing': True,
+      },
+  )
+  engine.render(max_passes=1)
+  assert engine.get_render_stats()['numCompletedSamples'] == 1
+  assert not engine.is_converged()
+
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      overrides={
+          'enableInteractive': True,
+          'mitsuba:sample_count': 8,
+          'mitsuba:interactive_samples_per_pass': 4,
+          'mitsuba:use_kernel_freezing': True,
+      },
+  )
+  engine.render(max_passes=1)
+  assert engine.get_render_stats()['numCompletedSamples'] == 4
+  assert not engine.is_converged()
+
+  engine.render(max_passes=1)
+  stats = engine.get_render_stats()
+  assert stats['numCompletedSamples'] == 8
+  assert stats['totalSamples'] == 8
+  assert engine.is_converged()
+
+  # Increasing mitsuba:sample_count resets progressive accumulation without
+  # rebuilding the delegate.
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      overrides={
+          'enableInteractive': True,
+          'mitsuba:sample_count': 12,
+          'mitsuba:interactive_samples_per_pass': 4,
+          'mitsuba:use_kernel_freezing': True,
+      },
+  )
+  engine.render(max_passes=1)
+  assert engine.get_render_stats()['numCompletedSamples'] == 4
+  assert not engine.is_converged()
+
+
+def test_interactive_tail_pass_clamping_with_kernel_freezing():
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  stage = _create_stage()
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      width=64,
+      overrides={
+          'enableInteractive': True,
+          'mitsuba:sample_count': 10,
+          'mitsuba:interactive_samples_per_pass': 4,
+          'mitsuba:use_kernel_freezing': True,
+      },
+  )
+  engine.render(max_passes=1)
+  assert engine.get_render_stats()['numCompletedSamples'] == 4
+  assert not engine.is_converged()
+
+  engine.render(max_passes=1)
+  assert engine.get_render_stats()['numCompletedSamples'] == 8
+  assert not engine.is_converged()
+
+  # Tail pass clamps to remaining 2 samples (10 - 8) without invalidating the
+  # 4-spp frozen recording for the next camera update.
+  engine.render(max_passes=1)
+  stats = engine.get_render_stats()
+  assert stats['numCompletedSamples'] == 10
+  assert stats['totalSamples'] == 10
+  assert engine.is_converged()

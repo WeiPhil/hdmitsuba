@@ -176,8 +176,8 @@ NB_MODULE(usd_render, m) {
       .def(
           "render",
           [](hdmitsuba::RenderEngine& engine,
-             std::optional<std::variant<pxr::UsdTimeCode, int>> time_code)
-              -> std::unordered_map<std::string, Array> {
+             std::optional<std::variant<pxr::UsdTimeCode, int>> time_code,
+             int max_passes) -> std::unordered_map<std::string, Array> {
             pxr::UsdTimeCode usd_time_code;
             if (time_code.has_value()) {
               if (std::holds_alternative<pxr::UsdTimeCode>(*time_code)) {
@@ -188,13 +188,30 @@ NB_MODULE(usd_render, m) {
             } else {
               usd_time_code = pxr::UsdTimeCode::Default();
             }
-            auto result = engine.Render(usd_time_code);
+            auto result = engine.Render(usd_time_code, max_passes);
             std::unordered_map<std::string, Array> result_map;
             for (auto& [key, buffer] : result) {
               result_map[key.GetText()] = CreateArray(buffer);
             }
             return result_map;
           },
-          nb::arg("time_code") = nb::none(),
-          "Renders a single frame and returns a dictionary of AOV buffers.");
+          nb::arg("time_code") = nb::none(), nb::arg("max_passes") = 0,
+          "Renders a frame and returns a dictionary of AOV buffers. When "
+          "max_passes <= 0 (default) the frame is rendered to convergence; a "
+          "positive value runs at most that many passes for progressive "
+          "rendering.")
+      .def("is_converged", &hdmitsuba::RenderEngine::IsConverged,
+           "Returns whether the most recent render fully converged (reached "
+           "the target sample count).")
+      .def(
+          "get_render_stats",
+          [](const hdmitsuba::RenderEngine& engine) {
+            std::unordered_map<std::string, pxr::VtValue> result;
+            for (const auto& [key, val] : engine.GetRenderStats()) {
+              result[key] = val;
+            }
+            return result;
+          },
+          "Returns render stats dictionary from the underlying Hydra "
+          "delegate.");
 }
