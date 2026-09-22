@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import drjit as dr
@@ -23,6 +24,7 @@ import mitsuba as mi
 import numpy as np
 
 from pxr import Gf
+from pxr import Sdf
 from pxr import Tf
 from pxr import Usd
 from pxr import UsdLux
@@ -115,6 +117,7 @@ def convert_mesh(
     prim: Usd.Prim,
     subdivision_level: int,
     time: Usd.TimeCode,
+    sensor_bindings: Mapping[Sdf.Path, Usd.Prim],
     custom_transform: Gf.Matrix4d | None = None,
 ) -> dict[str, mi.Mesh]:
   """Converts a mesh prim and returns a dictionary of Mitsuba meshes.
@@ -123,6 +126,7 @@ def convert_mesh(
     prim: The USD prim.
     subdivision_level: The subdivision level.
     time: The time code.
+    sensor_bindings: Precomputed shape path -> sensor prim map.
     custom_transform: Optional transform to use instead of local-to-world.
 
   Returns:
@@ -166,14 +170,10 @@ def convert_mesh(
     elif material_emitter is not None:
       props['emitter'] = material_emitter
 
-    if (sensor_attr := prim.GetAttribute('mitsuba:sensor')) and (
-        sensor_path := sensor_attr.Get()
-    ):
-      cam_prim = stage.GetPrimAtPath(sensor_path)
-      if cam_prim and cam_prim.IsA(UsdGeom.Camera):
-        props['sensor'] = mi.load_dict(
-            camera.usd_to_mitsuba(UsdGeom.Camera(cam_prim), time=time)
-        )
+    if (sensor_prim := sensor_bindings.get(path)) is not None:
+      props['sensor'] = mi.load_dict(
+          camera.usd_to_mitsuba(UsdGeom.Camera(sensor_prim), time=time)
+      )
 
     if displacement is not None:
       _apply_displacement(sub, displacement, mesh_data)

@@ -14,6 +14,7 @@
 
 #include "hdmitsuba/camera.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -21,6 +22,7 @@
 #include <drjit/sphere.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
@@ -36,6 +38,12 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace dr = drjit;
+
+TF_DEFINE_PRIVATE_TOKENS(
+    _tokens,
+    ((sensorType, "mitsuba:sensor:type"))
+    ((sensorShape, "mitsuba:sensor:shape"))
+    ((sensorPixelFilterType, "mitsuba:sensor:film:pixel_filter:type")));
 
 namespace {
 
@@ -58,6 +66,24 @@ ScalarAffineTransform4f UsdToMitsubaSensorTransform(
   return to_world;
 }
 
+std::optional<SdfPath> GetTargetShapeId(HdSceneDelegate* sceneDelegate,
+                                        const SdfPath& id) {
+  VtValue value = sceneDelegate->GetCameraParamValue(id, _tokens->sensorShape);
+  if (!value.IsHolding<std::string>()) {
+    return std::nullopt;
+  }
+  const std::string& path = value.UncheckedGet<std::string>();
+  if (path.empty()) {
+    return std::nullopt;
+  }
+  if (!SdfPath::IsValidPathString(path)) {
+    TF_WARN("Camera %s: mitsuba:sensor:shape is not a valid path: %s",
+            id.GetText(), path.c_str());
+    return std::nullopt;
+  }
+  return SdfPath(path);
+}
+
 }  // namespace
 
 HdMitsubaCamera::HdMitsubaCamera(const SdfPath& id) : HdCamera(id) {}
@@ -70,14 +96,12 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   HdCamera::Sync(sceneDelegate, renderParam, dirtyBits);  // Clears dirty bits.
 
   std::string sensor_type =
-      sceneDelegate
-          ->GetCameraParamValue(GetId(), TfToken("mitsuba:sensor:type"))
+      sceneDelegate->GetCameraParamValue(GetId(), _tokens->sensorType)
           .GetWithDefault<std::string>("perspective");
   if (dirty_bits_copy & HdCamera::DirtyParams) {
     film_pixel_filter_type_ =
         sceneDelegate
-            ->GetCameraParamValue(
-                GetId(), TfToken("mitsuba:sensor:film:pixel_filter:type"))
+            ->GetCameraParamValue(GetId(), _tokens->sensorPixelFilterType)
             .GetWithDefault<std::string>("");
   }
 
@@ -92,6 +116,7 @@ void HdMitsubaCamera::Sync(HdSceneDelegate* sceneDelegate,
   spec.near_clip = GetClippingRange().GetMin();
   spec.far_clip = GetClippingRange().GetMax();
   spec.dirty_bits = dirty_bits_copy;
+  spec.target_shape_id = GetTargetShapeId(sceneDelegate, GetId());
 
   spec.needs_rebuild = !is_instantiated_;
   spec.needs_rebuild |= sensor_type != sensor_type_;

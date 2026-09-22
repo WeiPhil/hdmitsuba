@@ -657,9 +657,25 @@ class SceneModel final : public SceneManager {
     auto prev_it = camera_specs_.find(spec.id);
     if (prev_it == camera_specs_.end()) {
       spec.needs_rebuild = true;
+    } else {
+      spec.needs_rebuild |= prev_it->second.needs_rebuild;
+      if (!spec.needs_rebuild) {
+        spec.dirty_bits |= prev_it->second.dirty_bits;
+      }
     }
-    if (prev_it != camera_specs_.end() && !spec.needs_rebuild) {
-      spec.dirty_bits |= prev_it->second.dirty_bits;
+    // Rebuild affected shapes if the surface sensor or its target changed.
+    std::optional<SdfPath> prev_target =
+        prev_it == camera_specs_.end() ? std::nullopt
+                                       : SurfaceSensorTarget(prev_it->second);
+    std::optional<SdfPath> target = SurfaceSensorTarget(spec);
+    if (prev_target != target || (target.has_value() && spec.needs_rebuild)) {
+      if (prev_target.has_value()) {
+        sensor_binding_dirty_.insert(*prev_target);
+      }
+      if (target.has_value()) {
+        sensor_binding_dirty_.insert(*target);
+      }
+      shape_sensors_dirty_ = true;
     }
     camera_specs_[spec.id] = std::move(spec);
     reset_progressive_ = true;
@@ -1091,6 +1107,10 @@ class SceneModel final : public SceneManager {
           // this affects the used pixel filter type.
           for (auto& [_, camera_spec] : camera_specs_) {
             camera_spec.needs_rebuild = true;
+            if (auto target = SurfaceSensorTarget(camera_spec)) {
+              sensor_binding_dirty_.insert(*target);
+              shape_sensors_dirty_ = true;
+            }
           }
           reset_progressive_ = true;
         }
@@ -1170,6 +1190,9 @@ class SceneModel final : public SceneManager {
           if (mat_flags & DirtyFlags::kMaterialUpdated) {
             needs_bsdf_update = true;
           }
+        }
+        if (sensor_binding_dirty_.contains(spec.id)) {
+          spec.needs_rebuild = true;
         }
       } else if constexpr (std::is_same_v<SpecType, CurveSpec>) {
         uint32_t mat_flags = 0;
@@ -1275,8 +1298,36 @@ class SceneModel final : public SceneManager {
         });
   }
 
+  static std::optional<SdfPath> SurfaceSensorTarget(const CameraSpec& spec) {
+    if (spec.sensor_type != "irradiancemeter") {
+      return std::nullopt;
+    }
+    return spec.target_shape_id;
+  }
+
+  void RebuildShapeSensorMap() {
+    shape_sensors_.clear();
+    for (const auto& [camera_id, spec] : camera_specs_) {
+      std::optional<SdfPath> target = SurfaceSensorTarget(spec);
+      if (!target.has_value()) {
+        continue;
+      }
+      auto sensor_it = surface_sensors_.find(camera_id.GetAsString());
+      if (sensor_it == surface_sensors_.end()) {
+        continue;
+      }
+      if (!shape_sensors_.try_emplace(target->GetAsString(), sensor_it->second)
+               .second) {
+        TF_WARN(
+            "Shape %s is already measured by another sensor; ignoring sensor "
+            "%s.",
+            target->GetText(), camera_id.GetText());
+      }
+    }
+  }
+
   bool CommitCameras() {
-    return ParallelCommit<decltype(camera_specs_), mitsuba::ref<Sensor>>(
+    bool rebuild = ParallelCommit<decltype(camera_specs_), mitsuba::ref<Sensor>>(
         camera_specs_,
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
           if (spec->needs_rebuild) {
@@ -1301,6 +1352,11 @@ class SceneModel final : public SceneManager {
           }
           return true;
         });
+    if (shape_sensors_dirty_) {
+      RebuildShapeSensorMap();
+      shape_sensors_dirty_ = false;
+    }
+    return rebuild;
   }
 
   struct EmitterSensorPair {
@@ -1311,7 +1367,7 @@ class SceneModel final : public SceneManager {
 
   EmitterSensorPair ResolveEmitterAndSensor(
       const std::optional<LightSpec>& emitter_spec, const SdfPath& material_id,
-      const std::optional<SdfPath>& attached_sensor_id) {
+      const SdfPath& shape_id) {
     EmitterSensorPair pair;
     if (emitter_spec.has_value()) {
       const LightSpec& l_spec = emitter_spec.value();
@@ -1333,12 +1389,9 @@ class SceneModel final : public SceneManager {
         pair.emitter_ptr = pair.mesh_emitter.get();
       }
     }
-    if (attached_sensor_id.has_value()) {
-      auto sens_it =
-          surface_sensors_.find(attached_sensor_id.value().GetAsString());
-      if (sens_it != surface_sensors_.end()) {
-        pair.sensor_ptr = sens_it->second.get();
-      }
+    auto sens_it = shape_sensors_.find(shape_id.GetAsString());
+    if (sens_it != shape_sensors_.end()) {
+      pair.sensor_ptr = sens_it->second.get();
     }
     return pair;
   }
@@ -1350,8 +1403,8 @@ class SceneModel final : public SceneManager {
       auto sub_meshes = RunGeometryPipeline(spec, work->displacement_textures);
       res.meshes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
-        auto env = ResolveEmitterAndSensor(
-            spec.emitter_spec, sub_mesh.material_id, spec.attached_sensor_id);
+        auto env = ResolveEmitterAndSensor(spec.emitter_spec,
+                                           sub_mesh.material_id, spec.id);
         ref<BSDF> bsdf = ResolveBsdf(sub_mesh.material_id, sub_mesh.primvars);
         auto mesh = PrimTranslator::BuildMesh(sub_mesh.id, sub_mesh.triangles,
                                               sub_mesh.primvars, bsdf.get(),
@@ -1414,7 +1467,7 @@ class SceneModel final : public SceneManager {
       prototype_shapes.reserve(sub_meshes.size());
       for (const auto& sub_mesh : sub_meshes) {
         auto env = ResolveEmitterAndSensor(std::nullopt, sub_mesh.material_id,
-                                           spec.attached_sensor_id);
+                                           spec.id);
         if (env.emitter_ptr != nullptr && !warned_emitter) {
           TF_WARN(
               "Mesh %s is instanced but has an emitter attached. Mitsuba "
@@ -1743,6 +1796,7 @@ class SceneModel final : public SceneManager {
     GarbageCollectTextureCache();
 
     material_dirty_flags_.clear();
+    sensor_binding_dirty_.clear();
   }
 
   mitsuba::Object* GetScene() override { return scene_.get(); }
@@ -1786,9 +1840,12 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_map<SdfPath, LightSpec, SdfPath::Hash> light_specs_;
   absl::flat_hash_map<SdfPath, CameraSpec, SdfPath::Hash> camera_specs_;
   absl::flat_hash_map<SdfPath, uint32_t, SdfPath::Hash> material_dirty_flags_;
+  absl::flat_hash_set<SdfPath, SdfPath::Hash> sensor_binding_dirty_;
+  bool shape_sensors_dirty_ = false;
 
   absl::flat_hash_map<std::string, ref<Sensor>> sensors_;
-  absl::flat_hash_map<std::string, mitsuba::ref<Object>> surface_sensors_;
+  absl::flat_hash_map<std::string, mitsuba::ref<Object>> surface_sensors_;  // Camera path -> sensor
+  absl::flat_hash_map<std::string, mitsuba::ref<Object>> shape_sensors_;    // Shape path -> sensor
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
   absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
