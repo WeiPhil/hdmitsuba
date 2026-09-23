@@ -106,6 +106,18 @@ def test_render_different_cameras(delegate_id: str):
 
   assert np.mean(np.abs(color_image_modified - color_image)) > 0.1
 
+  # Add a new camera to the stage and switch to it.
+  new_camera = UsdGeom.Camera.Define(stage, '/World/new_camera')
+  new_camera.AddTranslateOp().Set((0, 8, 0))
+  new_camera.AddRotateXOp().Set(-90)
+  engine.configure(
+      hydra_delegate_id=delegate_id,
+      width=100,
+      camera_path='/World/new_camera',
+  )
+  color_image_new_cam = engine.render()['color']
+  assert np.mean(np.abs(color_image_new_cam - color_image_modified)) > 0.05
+
 
 @pytest.mark.parametrize("force_rebuild", [True, False])
 @pytest.mark.parametrize("delegate_id", _DELEGATES)

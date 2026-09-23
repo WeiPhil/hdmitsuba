@@ -20,6 +20,7 @@
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/types.h>
+#include <pxr/imaging/hd/changeTracker.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/meshTopology.h>
 #include <pxr/imaging/hd/renderDelegate.h>
@@ -43,6 +44,10 @@ class HdMitsubaMesh final : public HdMesh {
  public:
   using PrimvarState = PXR_NS::PrimvarState;
   using PrimvarMap = PXR_NS::PrimvarMap;
+
+  // Custom dirty bit for mesh lights (may be removed in the future once 
+  // Hydra tracks these correctly automatically)
+  static constexpr HdDirtyBits DirtyLight = HdChangeTracker::CustomBitsBegin;
 
   explicit HdMitsubaMesh(const SdfPath& id,
                          const SdfPath& instancerId = SdfPath());
@@ -71,9 +76,12 @@ class HdMitsubaMesh final : public HdMesh {
   HdMeshTopology topology_;
   PrimvarMap primvars_;
 
-  void SyncTopology(HdSceneDelegate* sceneDelegate);
-  PrimvarMap SyncPrimvars(HdSceneDelegate* sceneDelegate,
-                          HdDirtyBits* dirtyBits);
+  // Resolves the effective subdivision level from the display style and the
+  // optional `mitsuba:subdivision_level` override.
+  int ResolveRefineLevel(HdSceneDelegate* sceneDelegate) const;
+
+  void SyncTopology(HdSceneDelegate* sceneDelegate, int refineLevel);
+  void SyncPrimvars(HdSceneDelegate* sceneDelegate, HdDirtyBits* dirtyBits);
   void UpdateScene(HdSceneDelegate* sceneDelegate, HdRenderParam* renderParam,
                    const PrimvarMap& final_primvars, HdDirtyBits* dirtyBits);
 
@@ -84,6 +92,7 @@ class HdMitsubaMesh final : public HdMesh {
 
   size_t instance_count_ = 0;
   bool in_scene_ = false;
+  int refine_level_ = -1; // -1 means "not yet synced"
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
