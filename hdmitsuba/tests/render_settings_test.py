@@ -171,6 +171,30 @@ def test_aovs_dynamic_update():
       results["normal"], results_updated["normal"], atol=0.05
   )
 
+  stage.GetPrimAtPath("/root/Render/Vars/normal").SetActive(False)
+  assert set(engine.render().keys()) == {"color"}
+
+
+def test_aovs_without_render_camera():
+  original_path = f"{test_helpers.TEST_ASSETS_PATH}/render_settings/aovs.usda"
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(original_path)
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/root/Render/Settings"
+  )
+  # Neither the render product nor the settings target a camera, which is
+  # passed to configure() instead.
+  UsdRender.Product(
+      stage.GetPrimAtPath("/root/Render/Products/MainOutput")
+  ).GetCameraRel().SetTargets([])
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      camera_path="/root/Camera/Camera",
+  )
+  assert set(engine.render().keys()) == {"color", "albedo", "normal", "depth"}
+
 
 def test_aovs_duplicate_resolving():
   original_path = f"{test_helpers.TEST_ASSETS_PATH}/render_settings/aovs.usda"

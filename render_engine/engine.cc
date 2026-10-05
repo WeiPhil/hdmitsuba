@@ -39,15 +39,21 @@
 #include <pxr/base/vt/value.h>
 #include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/aov.h>
+#include <pxr/imaging/hd/dataSource.h>
 #include <pxr/imaging/hd/engine.h>
 #include <pxr/imaging/hd/pluginRenderDelegateUniqueHandle.h>
 #include <pxr/imaging/hd/renderBuffer.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/renderIndex.h>
+#include <pxr/imaging/hd/renderProductSchema.h>
+#include <pxr/imaging/hd/renderSettingsSchema.h>
+#include <pxr/imaging/hd/renderVarSchema.h>
 #include <pxr/imaging/hd/rendererPlugin.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
 #include <pxr/imaging/hd/repr.h>
 #include <pxr/imaging/hd/rprimCollection.h>
+#include <pxr/imaging/hd/sceneIndex.h>
+#include <pxr/imaging/hd/schemaTypeDefs.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/hd/types.h>
 #include <pxr/imaging/hdx/renderSetupTask.h>
@@ -155,6 +161,48 @@ std::vector<RenderEngine::AovInfo> GetAovInfos(
     ret.push_back({std::move(var), std::move(name), std::move(descriptor)});
   }
   return ret;
+}
+
+// Reads the render vars of all render products from the render settings that
+// usdImaging flattens in the scene index. Unlike UsdRenderComputeSpec, this
+// keeps products without a camera since Configure() resolves the camera.
+std::vector<UsdRenderSpec::RenderVar> ReadRenderVars(
+    const HdSceneIndexBaseRefPtr& scene_index, const SdfPath& settings_path) {
+  std::vector<UsdRenderSpec::RenderVar> vars;
+  HdRenderProductVectorSchema products =
+      HdRenderSettingsSchema::GetFromParent(
+          scene_index->GetPrim(settings_path).dataSource)
+          .GetRenderProducts();
+  for (size_t i = 0; i < products.GetNumElements(); ++i) {
+    HdRenderVarVectorSchema product_vars =
+        products.GetElement(i).GetRenderVars();
+    for (size_t j = 0; j < product_vars.GetNumElements(); ++j) {
+      HdRenderVarSchema render_var = product_vars.GetElement(j);
+      const SdfPath var_path = render_var.GetPath()->GetTypedValue(0);
+      // Render vars shared between products are only read once.
+      if (std::any_of(vars.begin(), vars.end(),
+                      [&var_path](const UsdRenderSpec::RenderVar& var) {
+                        return var.renderVarPath == var_path;
+                      })) {
+        continue;
+      }
+      VtDictionary namespaced_settings;
+      HdSampledDataSourceContainerSchema settings =
+          render_var.GetNamespacedSettings();
+      for (const TfToken& name : settings.GetNames()) {
+        if (HdSampledDataSourceHandle value = settings.Get(name)) {
+          namespaced_settings[name.GetString()] = value->GetValue(0);
+        }
+      }
+      vars.push_back(
+          {.renderVarPath = var_path,
+           .dataType = render_var.GetDataType()->GetTypedValue(0),
+           .sourceName = render_var.GetSourceName()->GetTypedValue(0),
+           .sourceType = render_var.GetSourceType()->GetTypedValue(0),
+           .namespacedSettings = std::move(namespaced_settings)});
+    }
+  }
+  return vars;
 }
 
 size_t GetImageHeight(const UsdStagePtr& stage, const SdfPath& camera_path,
@@ -516,8 +564,8 @@ void RenderEngine::UpdateAovsAndBuffers() {
   UsdRenderSettings render_settings = read_res.second;
   std::vector<UsdRenderSpec::RenderVar> aovs;
   if (render_settings) {
-    UsdRenderSpec spec = UsdRenderComputeSpec(render_settings, {});
-    aovs = std::move(spec.renderVars);
+    aovs =
+        ReadRenderVars(display_style_scene_index_, render_settings.GetPath());
   }
   if (aovs.empty()) {
     aovs.push_back({.renderVarPath = SdfPath{"/Render/Vars/color"},
@@ -556,8 +604,8 @@ RenderEngine::Render(UsdTimeCode time_code) {
   if (it != settings_map_.end()) {
     enable_interactive = it->second.GetWithDefault<bool>(false);
   }
-  UpdateAovsAndBuffers();
   stage_scene_index_->ApplyPendingUpdates();
+  UpdateAovsAndBuffers();
   stage_scene_index_->SetTime(time_code);
   do {
     TF_PY_ALLOW_THREADS_IN_SCOPE();
