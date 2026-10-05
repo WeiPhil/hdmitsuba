@@ -1314,11 +1314,7 @@ class SceneModel final : public SceneManager {
       if (!target.has_value()) {
         continue;
       }
-      auto sensor_it = surface_sensors_.find(camera_id.GetAsString());
-      if (sensor_it == surface_sensors_.end()) {
-        continue;
-      }
-      if (!shape_sensors_.try_emplace(target->GetAsString(), sensor_it->second)
+      if (!shape_sensors_.try_emplace(target->GetAsString(), camera_id)
                .second) {
         TF_WARN(
             "Shape %s is already measured by another sensor; ignoring sensor "
@@ -1332,26 +1328,26 @@ class SceneModel final : public SceneManager {
     bool rebuild = ParallelCommit<decltype(camera_specs_), mitsuba::ref<Sensor>>(
         camera_specs_,
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
+          // Surface sensors are built together with their target mesh.
+          if (spec->sensor_type == "irradiancemeter") {
+            return;
+          }
           if (spec->needs_rebuild) {
             res = PrimTranslator::BuildSensor(*spec, progressive_rendering_);
           } else if (spec->dirty_bits != 0) {
-            if (spec->sensor_type != "irradiancemeter") {
-              auto it = sensors_.find(spec->id.GetAsString());
-              if (!TF_VERIFY(it != sensors_.end(),
-                             "Camera sensor not found: %s",
-                             spec->id.GetText())) {
-                return;
-              }
-              PrimTranslator::UpdateSensorInPlace(it->second.get(), *spec);
+            auto it = sensors_.find(spec->id.GetAsString());
+            if (!TF_VERIFY(it != sensors_.end(), "Camera sensor not found: %s",
+                           spec->id.GetText())) {
+              return;
             }
+            PrimTranslator::UpdateSensorInPlace(it->second.get(), *spec);
           }
         },
         [&](CameraSpec* spec, mitsuba::ref<Sensor>& res) {
           if (spec->sensor_type == "irradiancemeter") {
-            surface_sensors_[spec->id.GetAsString()] = res;
-          } else {
-            sensors_[spec->id.GetAsString()] = res;
+            return false;
           }
+          sensors_[spec->id.GetAsString()] = res;
           return true;
         });
     if (shape_sensors_dirty_) {
@@ -1364,6 +1360,7 @@ class SceneModel final : public SceneManager {
   struct EmitterSensorPair {
     mitsuba::ref<Object> mesh_emitter = nullptr;
     Object* emitter_ptr = nullptr;
+    mitsuba::ref<Object> mesh_sensor = nullptr;
     Object* sensor_ptr = nullptr;
   };
 
@@ -1391,9 +1388,13 @@ class SceneModel final : public SceneManager {
         pair.emitter_ptr = pair.mesh_emitter.get();
       }
     }
+    // A Mitsuba sensor can only be attached to one shape, so like the area
+    // emitter above, every (re)built mesh gets a fresh one.
     auto sens_it = shape_sensors_.find(shape_id.GetAsString());
     if (sens_it != shape_sensors_.end()) {
-      pair.sensor_ptr = sens_it->second.get();
+      pair.mesh_sensor = PrimTranslator::BuildSensor(
+          camera_specs_.at(sens_it->second), progressive_rendering_);
+      pair.sensor_ptr = pair.mesh_sensor.get();
     }
     return pair;
   }
@@ -1865,8 +1866,7 @@ class SceneModel final : public SceneManager {
   absl::flat_hash_set<SdfPath, SdfPath::Hash> sensor_binding_dirty_;
 
   absl::flat_hash_map<std::string, ref<Sensor>> sensors_;
-  absl::flat_hash_map<std::string, mitsuba::ref<Object>> surface_sensors_;  // Camera path -> sensor
-  absl::flat_hash_map<std::string, mitsuba::ref<Object>> shape_sensors_;    // Shape path -> sensor
+  absl::flat_hash_map<std::string, SdfPath> shape_sensors_;  // Shape -> camera
   absl::flat_hash_map<std::string, ref<Shape>> shapes_;
   absl::flat_hash_map<std::string, ref<Emitter>> emitters_;
   absl::flat_hash_map<std::string, ref<BSDF>> bsdfs_;
