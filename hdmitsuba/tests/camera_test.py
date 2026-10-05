@@ -286,3 +286,27 @@ def test_irradiancemeter_rebind():
       image_rebound[..., :3], image_offline, atol=0.05
   )
 
+
+def test_irradiancemeter_target_mesh_rebuild():
+  """Tests that rebuilding the target mesh of an irradiancemeter succeeds."""
+  stage = Usd.Stage.Open(
+      f'{test_helpers.TEST_ASSETS_PATH}/shapes/irradiancemeter.usda'
+  )
+  test_helpers.create_render_settings(stage, resolution=(128, 128))
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin',
+      camera_path='/root/Camera/Camera',
+  )
+  image_initial = engine.render()['color']
+
+  # Trigger a mesh rebuild on the target shape without modifying the camera.
+  target_prim = stage.GetPrimAtPath('/root/Cube/Cube')
+  target_prim.SetActive(False)
+  target_prim.SetActive(True)
+
+  image_rebuilt = engine.render()['color']
+  test_helpers.robust_assert_close(
+      image_initial[..., :3], image_rebuilt[..., :3], atol=0.05
+  )
