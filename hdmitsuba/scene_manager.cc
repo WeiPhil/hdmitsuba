@@ -46,6 +46,7 @@
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
+#include <mitsuba/core/random.h>
 #include <mitsuba/core/thread.h>
 #include <mitsuba/core/util.h>
 #include <mitsuba/render/fwd.h>
@@ -639,19 +640,23 @@ class SceneModel final : public SceneManager {
     if (samples_to_render > 0) {
       // 3. Render a chunk of samples
       TensorXf result;
-      uint32_t sample_index = progressive_rendering_
-          ? static_cast<uint32_t>(current_progressive_sample_)
-          : 0;
+      uint32_t pass_seed =
+          progressive_rendering_
+              ? mitsuba::sample_tea_32(
+                    seed_, static_cast<uint32_t>(current_progressive_sample_))
+                    .first
+              : seed_;
       bool run_frozen = false;
       if constexpr (dr::is_jit_v<Float>) {
         run_frozen = !has_instancing_ && frozen_render_;
       }
       if (run_frozen) {
-        result = frozen_render_->Render(scene_.get(), sensor, render_integrator,
-                                        sample_index, static_cast<uint32_t>(samples_to_render));
+        result = frozen_render_->Render(
+            scene_.get(), sensor, render_integrator, pass_seed,
+            static_cast<uint32_t>(samples_to_render));
       } else {
         result = render_integrator->render(
-            scene_.get(), sensor, sample_index,
+            scene_.get(), sensor, pass_seed,
             static_cast<uint32_t>(samples_to_render), true, true);
         if constexpr (dr::is_jit_v<Float>) {
           dr::sync_thread();
@@ -798,6 +803,16 @@ class SceneModel final : public SceneManager {
         int new_sample_count = it->second.Get<int>();
         if (static_cast<size_t>(new_sample_count) != sample_count_) {
           sample_count_ = new_sample_count;
+          reset_progressive_ = true;
+        }
+      }
+    }
+    {
+      auto it = namespaced_settings.find("mitsuba:seed");
+      if (it != namespaced_settings.end()) {
+        uint32_t new_seed = static_cast<uint32_t>(it->second.Get<int>());
+        if (new_seed != seed_) {
+          seed_ = new_seed;
           reset_progressive_ = true;
         }
       }
@@ -1653,6 +1668,7 @@ class SceneModel final : public SceneManager {
   std::string integrator_type_ = "path";
   absl::flat_hash_map<const HdRenderPass*, RenderPassState> pass_aov_states_;
   size_t sample_count_ = kDefaultSampleCount;
+  uint32_t seed_ = 0;
   int interactive_samples_per_pass_ = 1;
   bool has_instancing_ = false;
 
