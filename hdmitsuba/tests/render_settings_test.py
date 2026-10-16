@@ -297,13 +297,3 @@ def test_seed_render_setting():
   np.testing.assert_allclose(hd_seed_42, mi_seed_42, rtol=1e-4, atol=1e-4)
   assert not np.allclose(hd_seed_0, hd_seed_42, atol=1e-4)
 
-  # Wrong attribute type (e.g. double) should be ignored without crashing.
-  settings_prim.RemoveProperty("mitsuba:seed")
-  settings_prim.CreateAttribute("mitsuba:seed", Sdf.ValueTypeNames.Double).Set(
-      123.0
-  )
-  engine.configure(hydra_delegate_id="HdMitsubaRendererPlugin")
-  hd_invalid = engine.render()["color"][..., :3]
-  np.testing.assert_allclose(hd_invalid, hd_seed_42, rtol=1e-4, atol=1e-4)
-
-

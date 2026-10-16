@@ -783,16 +783,18 @@ class SceneModel final : public SceneManager {
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
-    if (auto val = GetSetting<int>(
-            namespaced_settings, "mitsuba:interactive_samples_per_pass")) {
-      int new_samples_per_pass = std::max(1, *val);
+    auto samples_per_pass = GetSetting<int>(
+        namespaced_settings, "mitsuba:interactive_samples_per_pass");
+    if (samples_per_pass.has_value()) {
+      int new_samples_per_pass = std::max(1, *samples_per_pass);
       if (new_samples_per_pass != interactive_samples_per_pass_) {
         interactive_samples_per_pass_ = new_samples_per_pass;
         reset_progressive_ = true;
       }
     }
-    if (auto integrator_type = GetSetting<std::string>(
-            namespaced_settings, "mitsuba:integrator:type")) {
+    auto integrator_type =
+        GetSetting<std::string>(namespaced_settings, "mitsuba:integrator:type");
+    if (integrator_type.has_value()) {
       if (*integrator_type != integrator_type_ || !integrator_) {
         TF_DEBUG(HDMITSUBA_LIFECYCLE)
             .Msg("Creating integrator, type: %s (was: %s)\n",
@@ -807,22 +809,25 @@ class SceneModel final : public SceneManager {
         reset_progressive_ = true;
       }
     }
-    if (auto val = GetSetting<int>(namespaced_settings,
-                                   "mitsuba:sample_count")) {
-      if (static_cast<size_t>(*val) != sample_count_) {
-        sample_count_ = *val;
+    auto sample_count =
+        GetSetting<int>(namespaced_settings, "mitsuba:sample_count");
+    if (sample_count.has_value()) {
+      if (static_cast<size_t>(*sample_count) != sample_count_) {
+        sample_count_ = *sample_count;
         reset_progressive_ = true;
       }
     }
-    if (auto val = GetSetting<int>(namespaced_settings, "mitsuba:seed")) {
-      uint32_t new_seed = static_cast<uint32_t>(*val);
+    auto seed = GetSetting<int>(namespaced_settings, "mitsuba:seed");
+    if (seed.has_value()) {
+      uint32_t new_seed = static_cast<uint32_t>(*seed);
       if (new_seed != seed_) {
         seed_ = new_seed;
         reset_progressive_ = true;
       }
     }
-    if (auto progressive =
-            GetSetting<bool>(namespaced_settings, "enableInteractive")) {
+    auto progressive =
+        GetSetting<bool>(namespaced_settings, "enableInteractive");
+    if (progressive.has_value()) {
       if (*progressive != progressive_rendering_) {
         progressive_rendering_ = *progressive;
         // A change in render mode requires rebuilding the sensors, since
@@ -838,8 +843,9 @@ class SceneModel final : public SceneManager {
         reset_progressive_ = true;
       }
     }
-    if (auto enabled = GetSetting<bool>(namespaced_settings,
-                                        "mitsuba:use_kernel_freezing")) {
+    auto enabled =
+        GetSetting<bool>(namespaced_settings, "mitsuba:use_kernel_freezing");
+    if (enabled.has_value()) {
       TF_DEBUG(HDMITSUBA_LIFECYCLE)
           .Msg("Kernel freezing setting: %d\n", *enabled);
       if constexpr (dr::is_jit_v<Float>) {
