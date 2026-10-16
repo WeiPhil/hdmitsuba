@@ -57,6 +57,7 @@
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/tf/diagnostic.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/base/tf/type.h>
 #include <pxr/base/trace/trace.h>
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/vt/types.h>
@@ -110,6 +111,22 @@ namespace dr = drjit;
 namespace {
 
 constexpr size_t kDefaultSampleCount = 128;
+
+template <typename T>
+std::optional<T> GetSetting(const VtDictionary& settings,
+                            const std::string& key) {
+  auto it = settings.find(key);
+  if (it == settings.end() || it->second.IsEmpty()) {
+    return std::nullopt;
+  }
+  if (it->second.IsHolding<T>()) {
+    return it->second.UncheckedGet<T>();
+  }
+  TF_WARN("Type mismatch for render setting '%s': expected %s, got %s",
+          key.c_str(), TfType::Find<T>().GetTypeName().c_str(),
+          it->second.GetTypeName().c_str());
+  return std::nullopt;
+}
 
 // Sync the Python-side Mitsuba variant so Python-defined plugins
 // (e.g. volprim_rf_basic) get registered for the delegate's variant.
@@ -766,91 +783,73 @@ class SceneModel final : public SceneManager {
       const VtDictionary& namespaced_settings) override {
     absl::MutexLock state_lock(state_mutex_);
     absl::MutexLock aov_lock(aov_states_mutex_);
-    {
-      auto it =
-          namespaced_settings.find("mitsuba:interactive_samples_per_pass");
-      if (it != namespaced_settings.end()) {
-        int new_samples_per_pass = std::max(1, it->second.Get<int>());
-        if (new_samples_per_pass != interactive_samples_per_pass_) {
-          interactive_samples_per_pass_ = new_samples_per_pass;
-          reset_progressive_ = true;
-        }
+    if (auto val = GetSetting<int>(
+            namespaced_settings, "mitsuba:interactive_samples_per_pass")) {
+      int new_samples_per_pass = std::max(1, *val);
+      if (new_samples_per_pass != interactive_samples_per_pass_) {
+        interactive_samples_per_pass_ = new_samples_per_pass;
+        reset_progressive_ = true;
       }
     }
-    {
-      auto it = namespaced_settings.find("mitsuba:integrator:type");
-      if (it != namespaced_settings.end()) {
-        std::string integrator_type = it->second.Get<std::string>();
-        if (integrator_type != integrator_type_ || !integrator_) {
-          TF_DEBUG(HDMITSUBA_LIFECYCLE)
-              .Msg("Creating integrator, type: %s (was: %s)\n",
-                   integrator_type.c_str(), integrator_type_.c_str());
-          Properties integrator_props(integrator_type);
-          integrator_ = PluginManager::instance()->create_object<Integrator>(
-              integrator_props);
-          integrator_type_ = integrator_type;
-          for (auto& [_, pass_state] : pass_aov_states_) {
-            pass_state.aov_integrator = nullptr;
-          }
-          reset_progressive_ = true;
-        }
-      }
-    }
-
-    {
-      auto it = namespaced_settings.find("mitsuba:sample_count");
-      if (it != namespaced_settings.end()) {
-        int new_sample_count = it->second.Get<int>();
-        if (static_cast<size_t>(new_sample_count) != sample_count_) {
-          sample_count_ = new_sample_count;
-          reset_progressive_ = true;
-        }
-      }
-    }
-    {
-      auto it = namespaced_settings.find("mitsuba:seed");
-      if (it != namespaced_settings.end()) {
-        uint32_t new_seed = static_cast<uint32_t>(it->second.Get<int>());
-        if (new_seed != seed_) {
-          seed_ = new_seed;
-          reset_progressive_ = true;
-        }
-      }
-    }
-    {
-      auto it = namespaced_settings.find("enableInteractive");
-      if (it != namespaced_settings.end()) {
-        bool progressive = it->second.Get<bool>();
-        if (progressive != progressive_rendering_) {
-          progressive_rendering_ = progressive;
-          // A change in render mode requires rebuilding the sensors, since
-          // this affects the used pixel filter type.
-          for (auto& [_, camera_spec] : camera_specs_) {
-            camera_spec.needs_rebuild = true;
-            if (auto target = SurfaceSensorTarget(camera_spec)) {
-              sensor_binding_dirty_.insert(*target);
-              shape_sensors_dirty_ = true;
-            }
-          }
-          has_pending_commits_ = true;
-          reset_progressive_ = true;
-        }
-      }
-    }
-    {
-      auto it = namespaced_settings.find("mitsuba:use_kernel_freezing");
-      if (it != namespaced_settings.end()) {
-        bool enabled = it->second.Get<bool>();
+    if (auto integrator_type = GetSetting<std::string>(
+            namespaced_settings, "mitsuba:integrator:type")) {
+      if (*integrator_type != integrator_type_ || !integrator_) {
         TF_DEBUG(HDMITSUBA_LIFECYCLE)
-            .Msg("Kernel freezing setting: %d\n", enabled);
-        if constexpr (dr::is_jit_v<Float>) {
-          if (enabled) {
-            if (!frozen_render_) {
-              frozen_render_ = std::make_unique<FrozenRender<Float, Spectrum>>(dr::backend_v<Float>);
-            }
-          } else {
-            frozen_render_.reset(); // Immediately destroys it and frees all JIT GPU memory!
+            .Msg("Creating integrator, type: %s (was: %s)\n",
+                 integrator_type->c_str(), integrator_type_.c_str());
+        Properties integrator_props(*integrator_type);
+        integrator_ = PluginManager::instance()->create_object<Integrator>(
+            integrator_props);
+        integrator_type_ = *integrator_type;
+        for (auto& [_, pass_state] : pass_aov_states_) {
+          pass_state.aov_integrator = nullptr;
+        }
+        reset_progressive_ = true;
+      }
+    }
+    if (auto val = GetSetting<int>(namespaced_settings,
+                                   "mitsuba:sample_count")) {
+      if (static_cast<size_t>(*val) != sample_count_) {
+        sample_count_ = *val;
+        reset_progressive_ = true;
+      }
+    }
+    if (auto val = GetSetting<int>(namespaced_settings, "mitsuba:seed")) {
+      uint32_t new_seed = static_cast<uint32_t>(*val);
+      if (new_seed != seed_) {
+        seed_ = new_seed;
+        reset_progressive_ = true;
+      }
+    }
+    if (auto progressive =
+            GetSetting<bool>(namespaced_settings, "enableInteractive")) {
+      if (*progressive != progressive_rendering_) {
+        progressive_rendering_ = *progressive;
+        // A change in render mode requires rebuilding the sensors, since
+        // this affects the used pixel filter type.
+        for (auto& [_, camera_spec] : camera_specs_) {
+          camera_spec.needs_rebuild = true;
+          if (auto target = SurfaceSensorTarget(camera_spec)) {
+            sensor_binding_dirty_.insert(*target);
+            shape_sensors_dirty_ = true;
           }
+        }
+        has_pending_commits_ = true;
+        reset_progressive_ = true;
+      }
+    }
+    if (auto enabled = GetSetting<bool>(namespaced_settings,
+                                        "mitsuba:use_kernel_freezing")) {
+      TF_DEBUG(HDMITSUBA_LIFECYCLE)
+          .Msg("Kernel freezing setting: %d\n", *enabled);
+      if constexpr (dr::is_jit_v<Float>) {
+        if (*enabled) {
+          if (!frozen_render_) {
+            frozen_render_ = std::make_unique<FrozenRender<Float, Spectrum>>(
+                dr::backend_v<Float>);
+          }
+        } else {
+          frozen_render_.reset(); // Immediately destroys it and frees all JIT GPU memory!
         }
       }
     }
