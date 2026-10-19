@@ -267,10 +267,10 @@ def test_volume_material_terminal_and_gridvolume(tmp_path):
   cube = stage.DefinePrim('/Cube', 'Cube')
   UsdShade.MaterialBindingAPI.Apply(cube).Bind(usd_material)
 
-  bsdf, emitter, displacement = material.convert_material(cube)
+  bsdf, emitter, displacement, medium = material.convert_material(cube)
   assert bsdf is not None and bsdf.class_name() == 'Null'
   assert emitter is None and displacement is None
-  assert isinstance(material.convert_volume(cube), mi.Medium)
+  assert isinstance(medium, mi.Medium)
 
   surface_shader = material_authoring.add_mitsuba_shader(
       stage, Sdf.Path('/Material/SurfaceShader'), {'type': 'diffuse'}
@@ -278,11 +278,13 @@ def test_volume_material_terminal_and_gridvolume(tmp_path):
   usd_material.CreateSurfaceOutput('mitsuba').ConnectToSource(
       surface_shader.ConnectableAPI(), 'surface'
   )
-  bsdf_with_surface, _, _ = material.convert_material(cube)
+  bsdf_with_surface, _, _, medium_with_surface = material.convert_material(cube)
   assert (
       bsdf_with_surface is not None
       and bsdf_with_surface.class_name() == 'SmoothDiffuse'
   )
+  assert isinstance(medium_with_surface, mi.Medium)
 
   usd_material.GetVolumeOutput().ClearSources()
-  assert material.convert_volume(cube) is None
+  _, _, _, cleared_medium = material.convert_material(cube)
+  assert cleared_medium is None

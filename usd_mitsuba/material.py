@@ -341,36 +341,11 @@ def has_displacement(prim: Usd.Prim) -> bool:
   return False
 
 
-def convert_volume(prim: Usd.Prim) -> mi.Medium | None:
-  """Parses a USD geometry prim and returns its interior Mitsuba medium.
-
-  Args:
-    prim: The USD prim to extract the volume material from.
-
-  Returns:
-    The Mitsuba Medium if a volume shader is bound, or None.
-
-  Raises:
-    ValueError: If the connected volume shader does not produce a Mitsuba
-      medium.
-  """
-  material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
-  if not material:
-    return None
-  if shader := _get_volume_shader(material):
-    medium_dict = usd_mitsuba_material_to_dict(shader, 'volume')
-    medium = mi.load_dict(medium_dict)
-    if not isinstance(medium, mi.Medium):
-      raise ValueError(
-          'Volume shader is not a Mitsuba medium. Please use a Mitsuba medium.'
-      )
-    return medium
-  return None
-
-
 def convert_material(
     prim: Usd.Prim,
-) -> tuple[mi.BSDF | None, mi.Emitter | None, mi.Texture | None]:
+) -> tuple[
+    mi.BSDF | None, mi.Emitter | None, mi.Texture | None, mi.Medium | None
+]:
   """Parses a USD geometry prim and returns Mitsuba material properties.
 
   This function will use the Mitsuba material variant if available, and
@@ -383,11 +358,11 @@ def convert_material(
     prim: The USD prim to extract the material from.
 
   Returns:
-    A tuple of the Mitsuba BSDF, emitter and displacement texture (each may
-    be None if not found).
+    A tuple of the Mitsuba BSDF, emitter, displacement texture, and interior
+    medium (each may be None if not found).
   """
 
-  bsdf, emitter, displacement = None, None, None
+  bsdf, emitter, displacement, interior_medium = None, None, None, None
   material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
   if material:
     if shader := find_shader(_get_surface_output(material)):
@@ -398,8 +373,18 @@ def convert_material(
       elif shader.GetShaderId().startswith(_MI_PREFIX):
         bsdf_dict = usd_mitsuba_material_to_dict(shader)
         bsdf = mi.load_dict(bsdf_dict)
-    if bsdf is None and _get_volume_shader(material) is not None:
-      bsdf = mi.load_dict({'type': 'null'})
+
+    if shader := _get_volume_shader(material):
+      medium_dict = usd_mitsuba_material_to_dict(shader, 'volume')
+      medium = mi.load_dict(medium_dict)
+      if not isinstance(medium, mi.Medium):
+        raise ValueError(
+            'Volume shader is not a Mitsuba medium. Please use a Mitsuba'
+            ' medium.'
+        )
+      interior_medium = medium
+      if bsdf is None:
+        bsdf = mi.load_dict({'type': 'null'})
 
     if shader := find_shader(_get_displacement_output(material)):
       bsdf_dict = usd_mitsuba_material_to_dict(shader, 'displacement')
@@ -420,4 +405,5 @@ def convert_material(
           },
       })
 
-  return bsdf, emitter, displacement
+  return bsdf, emitter, displacement, interior_medium
+

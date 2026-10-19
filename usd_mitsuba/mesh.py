@@ -171,7 +171,7 @@ def convert_mesh(
   has_emitter_or_sensor = (
       mesh_light_emitter is not None
       or sensor_prim is not None
-      or any(emitter is not None for _, emitter, _ in materials)
+      or any(emitter is not None for _, emitter, _, _ in materials)
   )
 
   motion_transform = None
@@ -190,10 +190,12 @@ def convert_mesh(
       motion_transform = motion.to_mitsuba_transform(samples)
 
   converted_meshes = {}
-  for sub, subprim, (bsdf, material_emitter, displacement) in zip(
-      sub_meshes, subprims, materials
-  ):
-    interior_medium = material.convert_volume(subprim)
+  for sub, subprim, (
+      bsdf,
+      material_emitter,
+      displacement,
+      interior_medium,
+  ) in zip(sub_meshes, subprims, materials):
     props = mi.Properties()
     if bsdf is not None:
       props['bsdf'] = bsdf

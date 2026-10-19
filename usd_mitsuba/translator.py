@@ -73,8 +73,7 @@ def _convert_cube(
     motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
   """Handles a cube prim and returns the Mitsuba shape dictionary."""
-  bsdf, emitter, displacement = material.convert_material(prim)
-  interior_medium = material.convert_volume(prim)
+  bsdf, emitter, displacement, interior_medium = material.convert_material(prim)
 
   if displacement is not None:
     raise ValueError(
@@ -102,7 +101,7 @@ def _convert_plane(
     motion_interval: tuple[float, float] = (0.0, 0.0),
 ) -> dict[str, Any]:
   """Handles a plane prim and returns the Mitsuba shape dictionary."""
-  bsdf, emitter, displacement = material.convert_material(prim)
+  bsdf, emitter, displacement, _ = material.convert_material(prim)
   if displacement is not None:
     raise ValueError(
         'Displacement is not supported for planes. Please use a mesh.'
@@ -192,8 +191,7 @@ def _convert_implicit_surface(
         },
     }
 
-  bsdf, emitter, displacement = material.convert_material(prim)
-  interior_medium = material.convert_volume(prim)
+  bsdf, emitter, displacement, interior_medium = material.convert_material(prim)
   if displacement is not None:
     raise ValueError(
         'Displacement is not supported for implicit surfaces. Please use a'
@@ -296,7 +294,7 @@ def _convert_curves(
   pts_homog = np.hstack([curve_points, ones])
   pts_world_homog = pts_homog @ world_mat
   curve_points = pts_world_homog[:, :3] / pts_world_homog[:, 3:4]
-  bsdf, _, _ = material.convert_material(prim)
+  bsdf, _, _, _ = material.convert_material(prim)
 
   world_scale = float(np.mean(np.linalg.norm(world_mat[:3, :3], axis=1)))
   widths = np.array(widths, dtype=np.float32) * world_scale

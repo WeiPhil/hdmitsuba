@@ -1,0 +1,142 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "root"
+{
+    def Xform "Camera"
+    {
+        float3 xformOp:rotateXYZ = (72, 0, 0)
+        double3 xformOp:translate = (0, -3.5, 1.4)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+        def Camera "Camera"
+        {
+            float2 clippingRange = (0.1, 100)
+            float focalLength = 0.5
+            float horizontalAperture = 0.36
+            float verticalAperture = 0.252
+        }
+    }
+
+    def Xform "Light"
+    {
+        double3 xformOp:translate = (2, -2, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def SphereLight "Light"
+        {
+            float inputs:intensity = 150
+            bool inputs:normalize = 1
+            float inputs:radius = 0.2
+        }
+    }
+
+    def Mesh "Ground"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-3, -3, -0.1), (3, -3, -0.1), (3, 3, -0.1), (-3, 3, -0.1)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "HomogeneousBox" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 4, 6, 2, 3, 2, 6, 7, 7, 6, 4, 5, 5, 1, 3, 7, 1, 0, 2, 3, 5, 4, 0, 1]
+        rel material:binding = </root/_materials/homogeneous>
+        point3f[] points = [(-0.1, 1, 1), (-0.1, 1, 0), (-0.1, 0, 1), (-0.1, 0, 0), (-1.1, 1, 1), (-1.1, 1, 0), (-1.1, 0, 1), (-1.1, 0, 0)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "HeterogeneousBox" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 4, 6, 2, 3, 2, 6, 7, 7, 6, 4, 5, 5, 1, 3, 7, 1, 0, 2, 3, 5, 4, 0, 1]
+        rel material:binding = </root/_materials/heterogeneous>
+        point3f[] points = [(1, 1, 1), (1, 1, 0), (1, 0, 1), (1, 0, 0), (0, 1, 1), (0, 1, 0), (0, 0, 1), (0, 0, 0)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Scope "_materials"
+    {
+        def Material "homogeneous"
+        {
+            token outputs:mitsuba:volume.connect = </root/_materials/homogeneous/Volume.outputs:volume>
+
+            def Shader "Volume"
+            {
+                uniform token info:id = "mitsuba_homogeneous"
+                float3 inputs:albedo.connect = </root/_materials/homogeneous/Volume/albedo.outputs:rgb>
+                token inputs:phase.connect = </root/_materials/homogeneous/Volume/phase.outputs:out>
+                float inputs:sigma_t = 3
+                token outputs:volume
+
+                def Shader "albedo"
+                {
+                    uniform token info:id = "mitsuba_srgb"
+                    float3 inputs:color = (0.9, 0.2, 0.2)
+                    float3 outputs:rgb
+                }
+
+                def Shader "phase"
+                {
+                    uniform token info:id = "mitsuba_hg"
+                    float inputs:g = 0.4
+                    token outputs:out
+                }
+            }
+        }
+
+        def Material "heterogeneous"
+        {
+            token outputs:mitsuba:volume.connect = </root/_materials/heterogeneous/Volume.outputs:volume>
+
+            def Shader "Volume"
+            {
+                uniform token info:id = "mitsuba_heterogeneous"
+                token inputs:albedo.connect = </root/_materials/heterogeneous/Volume/albedo.outputs:out>
+                float inputs:scale = 2
+                token inputs:sigma_t.connect = </root/_materials/heterogeneous/Volume/sigma_t.outputs:out>
+                token outputs:volume
+
+                def Shader "sigma_t"
+                {
+                    uniform token info:id = "mitsuba_gridvolume"
+                    asset inputs:filename = @./textures/density.vol@
+                    token outputs:out
+                }
+
+                def Shader "albedo"
+                {
+                    uniform token info:id = "mitsuba_constvolume"
+                    float3 inputs:value.connect = </root/_materials/heterogeneous/Volume/albedo/value.outputs:rgb>
+                    token outputs:out
+
+                    def Shader "value"
+                    {
+                        uniform token info:id = "mitsuba_srgb"
+                        float3 inputs:color = (0.2, 0.6, 0.9)
+                        float3 outputs:rgb
+                    }
+                }
+            }
+        }
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "PrimarySettings"
+    {
+        custom string mitsuba:integrator:type = "volpath"
+    }
+}
+
