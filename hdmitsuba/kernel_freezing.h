@@ -32,6 +32,7 @@
 #include <mitsuba/core/logger.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/properties.h>
+#include <mitsuba/core/spectrum.h>
 #include <mitsuba/core/util.h>
 #include <mitsuba/render/fwd.h>
 #include <mitsuba/render/integrator.h>
@@ -102,6 +103,13 @@ JITInputs<Float, Spectrum> GatherAllJitInputs(
     }
     if (integrator && collect_class_var(integrator)) {
       dr::traverse_fn(*integrator, &payload, visitor);
+    }
+    if constexpr (mitsuba::is_spectral_v<Spectrum>) {
+      using Float32 = dr::float32_array_t<Float>;
+      auto tables = mitsuba::detail::get_color_space_tables<Float32>();
+      dr::traverse_fn(tables.xyz, &payload, visitor);
+      dr::traverse_fn(tables.srgb, &payload, visitor);
+      dr::traverse_fn(tables.d65, &payload, visitor);
     }
 
     const char* variant_name = mitsuba::detail::variant<Float, Spectrum>::name;
