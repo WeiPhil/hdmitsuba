@@ -47,7 +47,7 @@ def _parse_aov_var(
   """Parses a single USD render var to a Mitsuba AOV."""
   var_prim = stage.GetPrimAtPath(var_path)
   render_var = UsdRender.Var(var_prim)
-  if not render_var:
+  if not render_var or not var_prim.IsActive():
     return None
 
   var_name = var_prim.GetName()
@@ -113,7 +113,7 @@ def parse_aovs(
 
   for product_path in product_targets:
     render_product = UsdRender.Product(stage.GetPrimAtPath(product_path))
-    if not render_product:
+    if not render_product or not render_product.GetPrim().IsActive():
       continue
     var_targets = render_product.GetOrderedVarsRel().GetTargets()
     if not var_targets:

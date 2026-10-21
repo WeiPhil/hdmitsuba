@@ -171,6 +171,34 @@ def test_aovs_dynamic_update():
       results["normal"], results_updated["normal"], atol=0.05
   )
 
+  stage.GetPrimAtPath("/root/Render/Vars/normal").SetActive(False)
+  assert set(engine.render().keys()) == {"color"}
+  assert usd_mitsuba.convert_to_mitsuba(stage)["integrator"]["type"] == "path"
+
+
+def test_aovs_camera_from_configure():
+  original_path = f"{test_helpers.TEST_ASSETS_PATH}/render_settings/aovs.usda"
+  stage = Usd.Stage.CreateInMemory()
+  stage.GetRootLayer().subLayerPaths.append(original_path)
+  stage.SetMetadata(
+      UsdRender.Tokens.renderSettingsPrimPath, "/root/Render/Settings"
+  )
+  UsdRender.Product(
+      stage.GetPrimAtPath("/root/Render/Products/MainOutput")
+  ).GetCameraRel().SetTargets([])
+
+  engine = usd_render.RenderEngine(stage)
+  engine.configure(
+      hydra_delegate_id="HdMitsubaRendererPlugin",
+      camera_path="/root/Camera/Camera",
+  )
+  scene_dict = usd_mitsuba.convert_to_mitsuba(stage)
+  assert (
+      scene_dict["integrator"]["aovs"]
+      == "albedo:albedo,normal:sh_normal,depth:depth"
+  )
+  assert set(engine.render().keys()) == {"color", "albedo", "normal", "depth"}
+
 
 def test_aovs_duplicate_resolving():
   original_path = f"{test_helpers.TEST_ASSETS_PATH}/render_settings/aovs.usda"

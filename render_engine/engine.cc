@@ -59,8 +59,10 @@
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdRender/product.h>
 #include <pxr/usd/usdRender/settings.h>
 #include <pxr/usd/usdRender/spec.h>
+#include <pxr/usd/usdRender/var.h>
 #include <pxr/usdImaging/usdImaging/sceneIndices.h>
 
 #include "absl/strings/str_cat.h"
@@ -155,6 +157,48 @@ std::vector<RenderEngine::AovInfo> GetAovInfos(
     ret.push_back({std::move(var), std::move(name), std::move(descriptor)});
   }
   return ret;
+}
+
+// Collects active UsdRenderVars directly instead of calling
+// UsdRenderComputeSpec(), which skips any RenderProduct without an authored
+// camera relationship (e.g. when `camera_path` is passed to Configure()) and
+// does not filter out deactivated prims.
+std::vector<UsdRenderSpec::RenderVar> ReadRenderVars(
+    const UsdRenderSettings& settings) {
+  UsdStageWeakPtr stage = settings.GetPrim().GetStage();
+  SdfPathVector product_paths;
+  settings.GetProductsRel().GetForwardedTargets(&product_paths);
+  std::vector<UsdRenderSpec::RenderVar> vars;
+  for (const SdfPath& product_path : product_paths) {
+    UsdRenderProduct product(stage->GetPrimAtPath(product_path));
+    if (!product || !product.GetPrim().IsActive()) {
+      continue;
+    }
+    SdfPathVector var_paths;
+    product.GetOrderedVarsRel().GetForwardedTargets(&var_paths);
+    for (const SdfPath& var_path : var_paths) {
+      if (std::any_of(vars.begin(), vars.end(),
+                      [&var_path](const UsdRenderSpec::RenderVar& existing) {
+                        return existing.renderVarPath == var_path;
+                      })) {
+        continue;
+      }
+      UsdPrim prim = stage->GetPrimAtPath(var_path);
+      if (!prim || !prim.IsActive() || !prim.IsA<UsdRenderVar>()) {
+        continue;
+      }
+      UsdRenderVar var(prim);
+      UsdRenderSpec::RenderVar spec_var;
+      spec_var.renderVarPath = var_path;
+      var.GetDataTypeAttr().Get(&spec_var.dataType);
+      var.GetSourceNameAttr().Get(&spec_var.sourceName);
+      var.GetSourceTypeAttr().Get(&spec_var.sourceType);
+      spec_var.namespacedSettings =
+          UsdRenderComputeNamespacedSettings(prim, {});
+      vars.push_back(std::move(spec_var));
+    }
+  }
+  return vars;
 }
 
 size_t GetImageHeight(const UsdStagePtr& stage, const SdfPath& camera_path,
@@ -520,8 +564,7 @@ void RenderEngine::UpdateAovsAndBuffers() {
       GetUsdRenderSettings(render_settings_prim_path_);
   std::vector<UsdRenderSpec::RenderVar> aovs;
   if (render_settings) {
-    UsdRenderSpec spec = UsdRenderComputeSpec(render_settings, {});
-    aovs = std::move(spec.renderVars);
+    aovs = ReadRenderVars(render_settings);
   }
   if (aovs.empty()) {
     aovs.push_back({.renderVarPath = SdfPath{"/Render/Vars/color"},
