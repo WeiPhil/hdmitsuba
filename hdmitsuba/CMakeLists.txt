@@ -20,6 +20,7 @@ add_library(hdMitsuba SHARED
   camera.cc
   config.cc
   debug_codes.cc
+  denoiser.cc
   curves.cc
   implicit_surface.cc
   light.cc
@@ -115,6 +116,15 @@ set_target_properties(hdMitsuba PROPERTIES
   INSTALL_RPATH "${PLATFORM_ORIGIN}/../../lib"
 )
 
+
+# Optional OpenImageDenoise support for CPU/LLVM/Metal denoising
+if(OpenImageDenoise_FOUND AND TARGET OpenImageDenoise)
+  message(STATUS "hdmitsuba: Found OpenImageDenoise, enabling OIDN denoiser.")
+  target_compile_definitions(hdMitsuba PRIVATE HDMITSUBA_ENABLE_OIDN=1)
+  target_link_libraries(hdMitsuba PRIVATE OpenImageDenoise)
+else()
+  message(STATUS "hdmitsuba: OpenImageDenoise not found, CPU/LLVM/Metal OIDN denoiser disabled.")
+endif()
 
 # Enable CUDA if needed
 option(HDMITSUBA_ENABLE_CUDA "Enable CUDA support for Mitsuba" OFF)
