@@ -61,6 +61,8 @@
 #include <pxr/imaging/hd/materialSchema.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/pxr.h>
+#include <pxr/usd/ar/resolvedPath.h>
+#include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/ar/resolverContextBinder.h>
 #include <pxr/usd/ar/resolverScopedCache.h>
 #include <pxr/usd/sdf/assetPath.h>
@@ -198,8 +200,9 @@ std::optional<std::string> ConvertToMtlxString(const VtValue& val) {
 // Resolves a MaterialX `NodeDef` from `std_libs`, handling legacy 1.38
 // `ND_normalmap` / `ND_swizzle_<in>_<out>` identifiers and custom Sdr `.mtlx`
 // assets. Caller must hold an exclusive lock on `mtlx_mu`.
-mx::NodeDefPtr ResolveNodeDef(const TfToken& hd_node_type,
+mx::NodeDefPtr ResolveNodeDef(const HdMaterialNode2& hd_node,
                               const mx::DocumentPtr& std_libs) {
+  const TfToken& hd_node_type = hd_node.nodeTypeId;
   const std::string& type_str = hd_node_type.GetString();
   if (mx::NodeDefPtr nd = std_libs->getNodeDef(type_str)) return nd;
   if (type_str == "ND_normalmap") {
@@ -237,7 +240,20 @@ mx::NodeDefPtr ResolveNodeDef(const TfToken& hd_node_type,
           std_libs->getNodeDef(sdr_node->GetImplementationName())) {
     return nd;
   }
-  const std::string& uri = sdr_node->GetResolvedImplementationURI();
+  std::string uri = sdr_node->GetResolvedImplementationURI();
+  if (uri.empty()) {
+    // OpenUSD's `UsdMtlxReadDocument` checks `TfIsFile` (`lstat`), which
+    // returns false for symlinked `.mtlx` files and leaves the Sdr source URI
+    // empty; fall back to the authored `sourceAsset` path.
+    if (auto it = hd_node.parameters.find(TfToken("info:sourceAsset"));
+        it != hd_node.parameters.end()) {
+      uri = ResolvePathFromValue(it->second);
+      if (std::string resolved = ArGetResolver().Resolve(uri).GetPathString();
+          !resolved.empty()) {
+        uri = std::move(resolved);
+      }
+    }
+  }
   static absl::NoDestructor<absl::flat_hash_set<std::string>> loaded_uris;
   if (uri.empty() || !loaded_uris->insert(uri).second) return nullptr;
   mx::DocumentPtr lib_doc = mx::createDocument();
@@ -327,7 +343,7 @@ class DocumentBuilder {
     auto node_it = net2_.nodes.find(path);
     if (node_it == net2_.nodes.end()) return {};
     const HdMaterialNode2& hd_node = node_it->second;
-    mx::NodeDefPtr nd = ResolveNodeDef(hd_node.nodeTypeId, std_libs_);
+    mx::NodeDefPtr nd = ResolveNodeDef(hd_node, std_libs_);
     if (!nd) {
       TF_WARN("No MaterialX NodeDef '%s' for node '%s'; ignoring the node.",
               hd_node.nodeTypeId.GetText(), path.GetText());
@@ -366,6 +382,7 @@ class DocumentBuilder {
       const std::string& p_name = param_tok.GetString();
       if (mx_node->getInput(p_name) ||
           absl::StartsWith(p_name, "colorSpace:") ||
+          absl::StartsWith(p_name, "info:") ||
           absl::StartsWith(p_name, "typeName:")) {
         continue;
       }

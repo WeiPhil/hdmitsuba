@@ -201,37 +201,44 @@ def test_image_channels_and_dead_branch_discovery(
     Sdf.FileFormat.FindByExtension('mtlx') is None,
     reason='Requires an OpenUSD build with MaterialX support.',
 )
-def test_source_asset_fileprefix(capfd: pytest.CaptureFixture[str]) -> None:
-  """Tests custom .mtlx sourceAsset graphs with fileprefix, overrides, and empty filenames.
+def test_source_asset_fileprefix(
+    tmp_path: pathlib.Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+  """Tests custom .mtlx sourceAsset graphs (including symlinked .mtlx files) with fileprefix, overrides, and empty filenames.
 
   Args:
+    tmp_path: Temporary directory fixture.
     capfd: Pytest fd capture fixture.
   """
-  stage = Usd.Stage.CreateInMemory()
-  custom = UsdShade.Shader.Define(stage, '/mesh/Material/CustomFp')
-  custom.SetSourceAsset(
-      Sdf.AssetPath(
-          f'{test_helpers.TEST_ASSETS_PATH}/materials/fileprefix_test.mtlx'
-      ),
-      'mtlx',
-  )
-  custom.SetSourceAssetSubIdentifier('ND_hdmitsuba_fp_test', 'mtlx')
-  custom.CreateInput('override_tex', Sdf.ValueTypeNames.Asset).Set(
-      _UV_QUADRANTS
-  )
-  si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
-  si.uv = mi.Point2f(0.25, 0.25)
-  capfd.readouterr()
-  actual = mtlx.eval_emission_expr(
-      custom.CreateOutput('out', Sdf.ValueTypeNames.Color3f),
-      stage=stage,
-      si=si,
-  )
-  assert 'Failed to load texture' not in capfd.readouterr().err
-  # `(60, 80, 220)/255 + (200, 40, 80)/255 + (0.1, 0.1, 0.1)`.
-  np.testing.assert_allclose(
-      actual, np.array([260.0, 120.0, 300.0]) / 255.0 + 0.1, atol=1e-4
-  )
+  materials_dir = pathlib.Path(f'{test_helpers.TEST_ASSETS_PATH}/materials')
+  symlink_mtlx = tmp_path / 'symlink_fileprefix_test.mtlx'
+  symlink_mtlx.symlink_to((materials_dir / 'fileprefix_test.mtlx').resolve())
+  (tmp_path / 'textures').symlink_to((materials_dir / 'textures').resolve())
+
+  for mtlx_asset in [
+      Sdf.AssetPath(f'{materials_dir.as_posix()}/fileprefix_test.mtlx'),
+      Sdf.AssetPath(symlink_mtlx.as_posix()),
+  ]:
+    stage = Usd.Stage.CreateInMemory()
+    custom = UsdShade.Shader.Define(stage, '/mesh/Material/CustomFp')
+    custom.SetSourceAsset(mtlx_asset, 'mtlx')
+    custom.SetSourceAssetSubIdentifier('ND_hdmitsuba_fp_test', 'mtlx')
+    custom.CreateInput('override_tex', Sdf.ValueTypeNames.Asset).Set(
+        _UV_QUADRANTS
+    )
+    si = mtlx.make_test_si(wi=(0.0, 0.0, 1.0))
+    si.uv = mi.Point2f(0.25, 0.25)
+    capfd.readouterr()
+    actual = mtlx.eval_emission_expr(
+        custom.CreateOutput('out', Sdf.ValueTypeNames.Color3f),
+        stage=stage,
+        si=si,
+    )
+    assert 'Failed to load texture' not in capfd.readouterr().err
+    # `(60, 80, 220)/255 + (200, 40, 80)/255 + (0.1, 0.1, 0.1)`.
+    np.testing.assert_allclose(
+        actual, np.array([260.0, 120.0, 300.0]) / 255.0 + 0.1, atol=1e-4
+    )
 
 
 def test_image_address_modes(tmp_path: pathlib.Path) -> None:
@@ -335,10 +342,10 @@ def test_image_and_value_colorspaces(tmp_path: pathlib.Path) -> None:
   c_node = mtlx.define_shader(
       stage, 'ConstCs', 'ND_constant_color3', value=(0.5, 0.25, 0.1)
   )
-  c_node.GetInput('value').GetAttr().SetColorSpace('lin_ciexyzd65_scene')
+  c_node.GetInput('value').GetAttr().SetColorSpace('lin_rec2020_scene')
   np.testing.assert_allclose(
       mtlx.eval_emission_expr(c_node, stage=stage),
-      (1.10155, 0.01291, 0.09055),
+      (0.67605, 0.22012, 0.07765),
       atol=1e-4,
   )
 

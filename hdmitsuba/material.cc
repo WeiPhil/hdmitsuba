@@ -65,6 +65,15 @@ void ConvertMaterialNetwork(const HdMaterialNetworkSchema& network_schema,
     HdMaterialNode2 node;
     node.nodeTypeId = GetParam<TfToken>(
         node_schema.GetContainer(), HdMaterialNodeSchemaTokens->nodeIdentifier);
+    if (auto type_info = node_schema.GetNodeTypeInfo()) {
+      for (const TfToken& key :
+           {TfToken("mtlx:sourceAsset"), TfToken("sourceAsset")}) {
+        if (auto ds = HdSampledDataSource::Cast(type_info->Get(key))) {
+          node.parameters[TfToken("info:sourceAsset")] = ds->GetValue(0.0f);
+          break;
+        }
+      }
+    }
 
     // Parameters
     if (auto params_schema = node_schema.GetParameters()) {
