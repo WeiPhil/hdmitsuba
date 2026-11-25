@@ -444,6 +444,7 @@ void RenderEngine::Configure(
     std::optional<int> refine_level_fallback,
     const HdRenderSettingsMap& overrides,
     const std::optional<TfTokenVector>& purposes) {
+  TF_PY_ALLOW_THREADS_IN_SCOPE();
   ArResolverScopedCache resolver_cache;
   UsdRenderSettings render_settings =
       GetUsdRenderSettings(render_settings_prim_path);
@@ -644,6 +645,7 @@ void RenderEngine::UpdateAovsAndBuffers() {
 absl::flat_hash_map<pxr::TfToken, RenderEngine::OutputBuffer,
                     TfToken::HashFunctor>
 RenderEngine::Render(UsdTimeCode time_code) {
+  TF_PY_ALLOW_THREADS_IN_SCOPE();
   ArResolverScopedCache resolver_cache;
   bool enable_interactive = false;
   auto it = settings_map_.find(pxr::HdRenderSettingsTokens->enableInteractive);
@@ -657,7 +659,6 @@ RenderEngine::Render(UsdTimeCode time_code) {
   stage_scene_index_->ApplyPendingUpdates();
   stage_scene_index_->SetTime(time_code);
   do {
-    TF_PY_ALLOW_THREADS_IN_SCOPE();
     engine_->Execute(render_index_.get(), &tasks_);
   } while (!IsConverged() && !enable_interactive);
 

@@ -14,6 +14,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import threading
+import time
+
 import numpy as np
 from pxr import Usd
 from pxr import UsdGeom
@@ -211,3 +215,63 @@ def test_render_purposes(delegate_id: str):
 
   assert visible() == [True, True, False]
   assert visible(purposes=['default', 'proxy']) == [True, False, True]
+
+
+def _count_peer_thread_ticks(fn: Callable[[], object]) -> int:
+  """Runs `fn` while counting how many times a peer Python thread runs."""
+  ready = threading.Event()
+  stop = threading.Event()
+  ticks: list[float] = []
+
+  def worker() -> None:
+    ready.set()
+    while not stop.is_set():
+      ticks.append(time.monotonic())
+      time.sleep(0.0005)
+
+  thread = threading.Thread(target=worker)
+  thread.start()
+  ready.wait()
+  try:
+    start = time.monotonic()
+    fn()
+    end = time.monotonic()
+  finally:
+    stop.set()
+    thread.join()
+  return sum(start < timestamp < end for timestamp in ticks)
+
+
+def test_configure_and_render_release_gil() -> None:
+  _skip_missing_delegate('HdMitsubaRendererPlugin')
+  # Warm up delegate plugin loading so configure() measures steady-state work.
+  warmup_stage = Usd.Stage.CreateInMemory()
+  UsdGeom.Camera.Define(warmup_stage, '/camera')
+  usd_render.RenderEngine(warmup_stage).configure(
+      hydra_delegate_id='HdMitsubaRendererPlugin', width=16
+  )
+
+  stage = Usd.Stage.CreateInMemory()
+  # Populate enough prims so camera discovery and scene index setup in
+  # configure() take tens of milliseconds even after delegate warm-up.
+  for i in range(6000):
+    UsdGeom.Xform.Define(stage, f'/World/xform_{i}')
+  UsdLux.DomeLight.Define(stage, '/World/dome_light')
+  camera = UsdGeom.Camera.Define(stage, '/World/z_camera')
+  camera.AddTranslateOp().Set((0, 0, 5))
+
+  engine = usd_render.RenderEngine(stage)
+  configure_ticks = _count_peer_thread_ticks(
+      lambda: engine.configure(
+          hydra_delegate_id='HdMitsubaRendererPlugin',
+          width=128,
+          overrides={
+              'mitsuba:variant': 'scalar_rgb',
+              'mitsuba:sampler:sample_count': 32,
+          },
+      )
+  )
+  assert configure_ticks >= 3
+
+  render_ticks = _count_peer_thread_ticks(engine.render)
+  assert render_ticks >= 3
